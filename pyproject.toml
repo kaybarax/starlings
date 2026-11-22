@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "starlings"
+version = "0.1.0"
+description = "Offline policy and contracts for a configurable local verification workflow"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = []
+
+[project.scripts]
+starlings = "starlings.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starlings"]
