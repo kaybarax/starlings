@@ -219,7 +219,7 @@ def handoff(ctx, batch, task, head, review, prerequisites):
     if not gitops.is_ancestor(mirror, b["base"], head):
         raise invalid(f"--head {head} does not descend from batch base {b['base']}")
     same = t["head"] == head and t["review"] == review and {row["prerequisite"]: row["declared"] for row in dependencies_rows(ctx, batch, task)} == {p: given.get(p) for p in declared} and set(given) <= set(declared)
-    if t["state"] in ("included", "staged"):
+    if t["state"] in ("pending", "included", "staged"):
         if same:
             return "ok", task_view(ctx, batch, task, repeated=True)
         raise Failure("conflict", "conflict", f"task {task!r} is already {t['state']}; its handoff cannot change")
@@ -238,7 +238,7 @@ def handoff(ctx, batch, task, head, review, prerequisites):
             elif row["head"] != given[row["prerequisite"]]:
                 reasons.append(f"prerequisite {row['prerequisite']!r} head {given[row['prerequisite']]} does not match handed-off head {row['head']}")
         state = load_task(c, batch, task)["state"]
-        if state in ("included", "staged"):
+        if state in ("pending", "included", "staged"):
             raise Failure("conflict", "conflict", f"task {task!r} became {state} concurrently")
         c.execute("UPDATE tasks SET head = ?, review = ?, state = ?, reason = ?, park_kind = ? WHERE batch = ? AND name = ?", (head, review, "parked" if reasons else "handed-off", "; ".join(reasons) or None, "handoff" if reasons else None, batch, task))
         for prerequisite in declared:
@@ -288,8 +288,85 @@ def lane_tip(ctx, b, lane_row):
     ref = refs(b["name"])["lane"](lane_row["name"])
     current = gitops.ref_value(mirror, ref)
     if current != lane_row["tip"] and not (current is None and lane_row["tip"] == b["base"]):
-        raise Failure("stale", "lane-diverged", f"{ref} is {current} but the journal records {lane_row['tip']}; reconciliation is not implemented in this milestone")
+        intent = ctx.store.connection.execute("SELECT * FROM include_intents WHERE batch = ? AND lane = ?", (b["name"], lane_row["name"])).fetchone()
+        detail = f"; an include intent for task {intent['task']!r} expected {intent['old'] or 'no ref'} or {intent['new']}" if intent else "; no include intent explains the difference"
+        raise Failure("stale", "lane-diverged", f"{ref} is {current} but the journal records {lane_row['tip']}{detail}; nothing was written")
     return ref, current
+
+
+def finish_include(tx, batch, lane, task, commit, resolution):
+    position = tx.execute("SELECT COALESCE(MAX(included_position), 0) + 1 FROM tasks WHERE batch = ? AND lane = ?", (batch, lane)).fetchone()[0]
+    tx.execute("UPDATE tasks SET state = 'included', reason = NULL, park_kind = NULL, included_commit = ?, included_position = ? WHERE batch = ? AND name = ?", (commit, position, batch, task))
+    tx.execute("UPDATE lanes SET tip = ? WHERE batch = ? AND name = ?", (commit, batch, lane))
+    if resolution is not None:
+        tx.execute("INSERT INTO resolutions(batch, lane, task, head, review, lane_parent, ref) VALUES (?, ?, ?, ?, ?, ?, ?)", (batch, lane, task, *resolution))
+
+
+def reconcile_lane(ctx, lease, b, lane, strict=True):
+    from . import promotion
+    mirror = Path(b["mirror"])
+    ref = refs(b["name"])["lane"](lane)
+    actions = promotion.reconcile_target(ctx, lease, str(mirror), ref)
+    intent = ctx.store.connection.execute("SELECT * FROM include_intents WHERE batch = ? AND lane = ?", (b["name"], lane)).fetchone()
+    if intent is not None:
+        actual = gitops.ref_value(mirror, ref) or ""
+        action = {"kind": "include", "lane": lane, "task": intent["task"], "old": intent["old"] or None, "new": intent["new"], "observed": actual or None}
+        if actual in (intent["new"], intent["old"]):
+            with ctx.store.transaction() as tx:
+                ctx.store.check(tx, lease)
+                if actual == intent["new"]:
+                    finish_include(tx, b["name"], lane, intent["task"], intent["new"], tuple(json.loads(intent["resolution"])) if intent["resolution"] else None)
+                tx.execute("DELETE FROM include_intents WHERE batch = ? AND lane = ?", (b["name"], lane))
+            action["action"] = "finished" if actual == intent["new"] else "dropped"
+        else:
+            action["action"] = "diverged"
+        actions.append(action)
+    if strict:
+        promotion.ensure_unparked(ctx.store.connection, str(mirror), ref)
+    return actions
+
+
+def task_gate(b):
+    return json.loads(b["policy"])["gates"]["task"]["scope"] != "none"
+
+
+def task_entry(c, batch, t):
+    return (t["name"], t["lane"], t["head"], t["review"], tuple((row["prerequisite"], row["declared"]) for row in dependencies(c, batch, t["name"])))
+
+
+def task_candidate(ctx, lease, b, t, ref, current, tip, commit, tree, parents, resolution=None):
+    mirror = Path(b["mirror"])
+    batch = b["name"]
+    if current is None:
+        if not gitops.update_ref(mirror, ref, tip, gitops.zero(mirror), f"starlings: lane {batch}/{t['lane']}"):
+            raise Failure("stale", "stale", f"{ref} moved concurrently; nothing was recorded")
+    c = ctx.store.connection
+    candidate = Candidate(b["project"], b["authority"], ref, tip, tuple(parents), tree, commit)
+    assembly = Assembly(candidate.id, batch, (t["lane"],), (task_entry(c, batch, t),), ((t["lane"], t["name"], resolution[0], resolution[1]),) if resolution else ())
+    candidate_ref = refs(batch)["candidate"](candidate.id)
+    retained = gitops.ref_value(mirror, candidate_ref)
+    if retained != commit and not gitops.update_ref(mirror, candidate_ref, commit, retained or gitops.zero(mirror), f"starlings: task candidate {candidate.id}"):
+        raise Failure("stale", "stale", f"{candidate_ref} moved concurrently")
+    with ctx.store.transaction() as tx:
+        ctx.store.check(tx, lease)
+        tx.execute("UPDATE task_candidates SET state = 'stale' WHERE batch = ? AND task = ? AND state = 'pending' AND id != ?", (batch, t["name"], candidate.id))
+        tx.execute("INSERT OR IGNORE INTO task_candidates(id, batch, lane, task, base, commit_sha, ref, state, resolution, record, assembly_id, assembly, created) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)", (candidate.id, batch, t["lane"], t["name"], tip, commit, candidate_ref, json.dumps(resolution) if resolution else None, json.dumps(candidate.to_dict(), sort_keys=True), assembly.id, json.dumps(assembly.to_dict(), sort_keys=True), ctx.store.clock()))
+        tx.execute("UPDATE task_candidates SET state = 'pending' WHERE id = ?", (candidate.id,))
+        tx.execute("UPDATE tasks SET state = 'pending', reason = NULL, park_kind = NULL WHERE batch = ? AND name = ?", (batch, t["name"]))
+    return {"task": t["name"], "head": t["head"], "candidate_id": candidate.id, "candidate": candidate.to_dict(), "assembly_id": assembly.id, "assembly": assembly.to_dict(), "ref": candidate_ref, "commit": commit, "base": tip, "target": ref}
+
+
+def pending_task(ctx, lease, b, t, tip):
+    c = ctx.store.connection
+    row = c.execute("SELECT * FROM task_candidates WHERE batch = ? AND task = ? AND state = 'pending' ORDER BY created DESC", (b["name"], t["name"])).fetchone()
+    if row is not None and row["base"] == tip:
+        record = json.loads(row["record"])
+        return {"task": t["name"], "head": t["head"], "candidate_id": row["id"], "candidate": record, "assembly_id": row["assembly_id"], "assembly": json.loads(row["assembly"]), "ref": row["ref"], "commit": row["commit_sha"], "base": row["base"], "target": record["target"], "repeated": True}
+    with ctx.store.transaction() as tx:
+        ctx.store.check(tx, lease)
+        tx.execute("UPDATE task_candidates SET state = 'stale' WHERE batch = ? AND task = ? AND state = 'pending'", (b["name"], t["name"]))
+        tx.execute("UPDATE tasks SET state = 'handed-off' WHERE batch = ? AND name = ? AND state = 'pending'", (b["name"], t["name"]))
+    return None
 
 
 def excluded_globs(b):
@@ -331,16 +408,19 @@ def undeclared_reason(names):
 
 def include(ctx, lease, b, lane, task, ref, current, commit, resolution=None):
     mirror = Path(b["mirror"])
+    info = {"batch": b["name"], "lane": lane, "task": task, "old": current, "new": commit}
     with ctx.store.transaction() as c:
         ctx.store.check(c, lease)
+        c.execute("INSERT INTO include_intents(batch, lane, task, old, new, resolution, created) VALUES (?, ?, ?, ?, ?, ?, ?)", (b["name"], lane, task, current or "", commit, json.dumps(resolution) if resolution is not None else None, ctx.store.clock()))
+    ctx.hook("include-before-write", info)
     if not gitops.update_ref(mirror, ref, commit, current or gitops.zero(mirror), f"starlings: include {b['name']}/{task}"):
+        with ctx.store.transaction() as c:
+            c.execute("DELETE FROM include_intents WHERE batch = ? AND lane = ?", (b["name"], lane))
         raise Failure("stale", "stale", f"{ref} moved concurrently; nothing was recorded")
+    ctx.hook("include-after-write", info)
     with ctx.store.transaction() as c:
-        position = c.execute("SELECT COALESCE(MAX(included_position), 0) + 1 FROM tasks WHERE batch = ? AND lane = ?", (b["name"], lane)).fetchone()[0]
-        c.execute("UPDATE tasks SET state = 'included', reason = NULL, park_kind = NULL, included_commit = ?, included_position = ? WHERE batch = ? AND name = ?", (commit, position, b["name"], task))
-        c.execute("UPDATE lanes SET tip = ? WHERE batch = ? AND name = ?", (commit, b["name"], lane))
-        if resolution is not None:
-            c.execute("INSERT INTO resolutions(batch, lane, task, head, review, lane_parent, ref) VALUES (?, ?, ?, ?, ?, ?, ?)", (b["name"], lane, task, *resolution))
+        finish_include(c, b["name"], lane, task, commit, resolution)
+        c.execute("DELETE FROM include_intents WHERE batch = ? AND lane = ?", (b["name"], lane))
 
 
 def assemble(ctx, batch, lane, owner=None, seconds=600):
@@ -351,8 +431,12 @@ def assemble(ctx, batch, lane, owner=None, seconds=600):
         raise Failure("blocked", "frozen", f"lane {lane!r} is frozen; further assembly is refused")
     lease = lane_lease(ctx, batch, lane, owner, seconds)
     result = {"batch": batch, "lane": lane, "included": [], "parked": [], "waiting": []}
+    gated = task_gate(b)
     try:
         ctx.hook("lane-lease", {"batch": batch, "lane": lane})
+        recovery = reconcile_lane(ctx, lease, b, lane)
+        if recovery:
+            result["recovery"] = recovery
         lane_row = load_lane(c, batch, lane)
         if lane_row["frozen"]:
             raise Failure("blocked", "frozen", f"lane {lane!r} is frozen; further assembly is refused")
@@ -363,6 +447,12 @@ def assemble(ctx, batch, lane, owner=None, seconds=600):
             t = load_task(c, batch, name)
             if t["state"] in ("included", "staged"):
                 continue
+            if t["state"] == "pending":
+                waiting = pending_task(ctx, lease, b, t, tip)
+                if waiting is not None:
+                    result["pending"] = waiting
+                    break
+                t = load_task(c, batch, name)
             if t["state"] == "assigned":
                 result["waiting"].append(name)
                 continue
@@ -397,6 +487,9 @@ def assemble(ctx, batch, lane, owner=None, seconds=600):
                 result["parked"].append({"task": name, "kind": "conflict", "reason": reason, "paths": conflicts, "lane_tip": tip})
                 continue
             commit = gitops.commit_tree(mirror, tree, (tip, t["head"]), f"starlings: include {name} in {batch}/{lane}\n\nTask-Head: {t['head']}\nReview: {t['review']}\n", b["created"])
+            if gated:
+                result["pending"] = task_candidate(ctx, lease, b, t, ref, current, tip, commit, tree, (tip, t["head"]))
+                break
             include(ctx, lease, b, lane, name, ref, current, commit)
             result["included"].append({"task": name, "head": t["head"], "commit": commit})
             tip = current = commit
@@ -406,6 +499,9 @@ def assemble(ctx, batch, lane, owner=None, seconds=600):
         raise Failure("stale", "lease-lost", str(exc)) from exc
     finally:
         release(ctx, lease, result)
+    if "pending" in result:
+        result["note"] = f"task gate scope is {json.loads(b['policy'])['gates']['task']['scope']}; task {result['pending']['task']!r} awaits verification and promotion before {result['ref']} advances"
+        return "pending", result
     return ("parked" if result["parked"] else "ok"), result
 
 
@@ -438,6 +534,9 @@ def resolve(ctx, batch, lane, task, head, review, owner=None, seconds=600):
     lease = lane_lease(ctx, batch, lane, owner, seconds)
     result = {}
     try:
+        recovery = reconcile_lane(ctx, lease, b, lane)
+        if recovery:
+            result["recovery"] = recovery
         lane_row = load_lane(c, batch, lane)
         if lane_row["frozen"]:
             raise Failure("blocked", "frozen", f"lane {lane!r} is frozen")
@@ -463,6 +562,10 @@ def resolve(ctx, batch, lane, task, head, review, owner=None, seconds=600):
         retained = gitops.ref_value(mirror, resolution_ref)
         if retained != head and not gitops.update_ref(mirror, resolution_ref, head, retained or gitops.zero(mirror), f"starlings: resolution {batch}/{lane}/{task}"):
             raise Failure("stale", "stale", f"{resolution_ref} moved concurrently")
+        if task_gate(b):
+            result["pending"] = task_candidate(ctx, lease, b, load_task(c, batch, task), ref, current, tip, head, gitops.tree_of(mirror, head), gitops.parents_of(mirror, head), (head, review, tip, resolution_ref))
+            result.update(task_view(ctx, batch, task))
+            return "pending", result
         include(ctx, lease, b, lane, task, ref, current, head, (head, review, tip, resolution_ref))
         result.update(task_view(ctx, batch, task))
         result["resolution"] = dict(c.execute("SELECT * FROM resolutions WHERE batch = ? AND lane = ? AND task = ?", (batch, lane, task)).fetchone())
@@ -489,6 +592,9 @@ def freeze(ctx, batch, lane, owner=None, seconds=600):
     lease = lane_lease(ctx, batch, lane, owner, seconds)
     result = {"batch": batch, "lane": lane}
     try:
+        recovery = reconcile_lane(ctx, lease, b, lane)
+        if recovery:
+            result["recovery"] = recovery
         lane_row = load_lane(c, batch, lane)
         lane_tip(ctx, b, lane_row)
         tip = lane_row["tip"]
@@ -597,6 +703,11 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
     status = "ok"
     try:
         ctx.hook("target-lease", {"batch": batch, "lanes": lanes})
+        from . import promotion
+        recovery = promotion.reconcile_target(ctx, lease, str(authority), target)
+        if recovery:
+            result["recovery"] = recovery
+        promotion.ensure_unparked(c, str(authority), target)
         rows = sorted((load_lane(c, batch, lane) for lane in lanes), key=lambda row: row["position"])
         pending = [row for row in rows if not row["staged_candidate"]]
         result["already_staged"] = [{"lane": row["name"], "candidate": row["staged_candidate"]} for row in rows if row["staged_candidate"]]
@@ -658,7 +769,7 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
                 entry["state"] = "pending"
                 result["candidates"].append(entry)
                 result["waiting_lanes"] = [row["name"] for row in pending if row["name"] not in names]
-                result["note"] = f"staging gate scope is {gate['scope']}; the candidate awaits verification (a later milestone) and {target} was not advanced"
+                result["note"] = f"staging gate scope is {gate['scope']}; the candidate awaits verification and promotion (starlings promote) and {target} was not advanced"
                 status = "pending"
                 break
             ctx.hook("before-write", {"batch": batch, "candidate": candidate.id, "old": old, "commit": commit})
@@ -702,4 +813,8 @@ def status(ctx, batch):
     candidates = []
     for row in c.execute("SELECT * FROM candidates WHERE batch = ? ORDER BY created, id", (batch,)).fetchall():
         candidates.append({"id": row["id"], "state": row["state"], "lanes": json.loads(row["lanes"]), "base": row["base"], "commit": row["commit_sha"], "ref": row["ref"], "ref_sha": gitops.ref_value(mirror, row["ref"]), "candidate": json.loads(row["record"]), "assembly_id": row["assembly_id"], "assembly": json.loads(row["assembly"])})
-    return "ok", {**batch_summary(b, None), "lanes": lanes, "tasks": tasks, "resolutions": resolutions, "stage_resolutions": stage_resolutions, "candidates": candidates, "authority_heads": {b["staging"]: gitops.resolve(authority, f"refs/heads/{b['staging']}"), b["release"]: gitops.resolve(authority, f"refs/heads/{b['release']}")}}
+    task_candidates = [{"id": row["id"], "state": row["state"], "lane": row["lane"], "task": row["task"], "base": row["base"], "commit": row["commit_sha"], "ref": row["ref"], "candidate": json.loads(row["record"]), "assembly_id": row["assembly_id"]} for row in c.execute("SELECT * FROM task_candidates WHERE batch = ? ORDER BY created, id", (batch,)).fetchall()]
+    promotions = [{"id": row["id"], "state": row["state"], "gate": row["gate"], "plan_id": row["plan_id"], "receipt_id": row["receipt_id"], "target": row["target"], "repository": row["repository"], "old": row["old"], "new": row["new"], "observed": row["observed"], "resolution": row["resolution"], "approvals": json.loads(row["approvals"]), "record": json.loads(row["record"]) if row["record"] else None} for row in c.execute("SELECT * FROM promotions WHERE batch = ? ORDER BY created, id", (batch,)).fetchall()]
+    approvals = [{"id": row["id"], "plan_id": row["plan_id"], "by": row["by_identity"], "review": row["review"], "granted_at": row["granted_at"], "expires_at": row["expires_at"], "revoked_at": row["revoked_at"], "live": row["revoked_at"] is None and row["expires_at"] > ctx.store.clock()} for row in c.execute("SELECT a.* FROM approvals a JOIN plans p ON p.id = a.plan_id WHERE p.batch = ? ORDER BY a.granted_at, a.rowid", (batch,)).fetchall()]
+    intents = [dict(row) for row in c.execute("SELECT * FROM include_intents WHERE batch = ? ORDER BY lane", (batch,)).fetchall()]
+    return "ok", {**batch_summary(b, None), "lanes": lanes, "tasks": tasks, "resolutions": resolutions, "stage_resolutions": stage_resolutions, "candidates": candidates, "task_candidates": task_candidates, "promotions": promotions, "approvals": approvals, "include_intents": intents, "authority_heads": {b["staging"]: gitops.resolve(authority, f"refs/heads/{b['staging']}"), b["release"]: gitops.resolve(authority, f"refs/heads/{b['release']}")}}

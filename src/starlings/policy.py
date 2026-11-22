@@ -66,8 +66,10 @@ def validate(data):
     table(data["gates"], "gates", ("task", "staging", "release"))
     for name, gate in data["gates"].items():
         path = f"gates.{name}"
-        table(gate, path, ("scope",), ("executor", "environment", "checks", "mode") if name == "staging" else ("executor", "environment", "checks"))
+        table(gate, path, ("scope",), ("executor", "environment", "checks", "approvals", "mode") if name == "staging" else ("executor", "environment", "checks", "approvals"))
         choice(gate["scope"], path + ".scope", ("none", "affected", "full"))
+        if "approvals" in gate:
+            require(type(gate["approvals"]) is int and 0 <= gate["approvals"] <= 16, path + ".approvals", "expected an integer between 0 and 16, not a boolean")
         if name == "staging":
             choice(gate.get("mode"), path + ".mode", ("each-lane", "combined-ready"))
         for key, choices in (("executor", ("local", "github")), ("environment", ("native", "guest"))):

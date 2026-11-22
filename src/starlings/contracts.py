@@ -4,6 +4,8 @@ import json
 import re
 from typing import ClassVar
 
+LANE_REF = re.compile(r"refs/starlings/[a-z0-9][a-z0-9_-]{0,62}/lanes/[a-z0-9][a-z0-9_-]{0,62}")
+
 
 def nonempty(value, name):
     if type(value) is not str or not value.strip() or any(ord(c) < 32 for c in value):
@@ -50,8 +52,8 @@ class Candidate(Record):
         for name in ("repository", "authority", "target"):
             nonempty(getattr(self, name), name)
         branch = self.target.removeprefix("refs/heads/")
-        if not self.target.startswith("refs/heads/") or not branch or branch.startswith(("-", "/", ".")) or branch.endswith(("/", ".")) or any(x in branch for x in ("..", "@{", "//")) or re.search(r"[\s~^:?*\[\\\x7f]", branch) or any(x.endswith(".lock") or x.startswith(".") for x in branch.split("/")) or branch == "@":
-            raise ValueError("target: expected a valid fully qualified branch ref")
+        if not LANE_REF.fullmatch(self.target) and (not self.target.startswith("refs/heads/") or not branch or branch.startswith(("-", "/", ".")) or branch.endswith(("/", ".")) or any(x in branch for x in ("..", "@{", "//")) or re.search(r"[\s~^:?*\[\\\x7f]", branch) or any(x.endswith(".lock") or x.startswith(".") for x in branch.split("/")) or branch == "@"):
+            raise ValueError("target: expected a valid fully qualified branch ref or refs/starlings/<batch>/lanes/<lane>")
         for name in ("base", "tree", "commit"):
             digest(getattr(self, name), name, (40, 64))
         if type(self.parents) is not tuple or not self.parents:
@@ -127,8 +129,8 @@ class Receipt(Record):
     def __post_init__(self):
         reference(self.candidate_id, "candidate")
         reference(self.plan_id, "plan")
-        if type(self.target) is not str or not self.target.startswith("refs/heads/") or len(self.target) <= len("refs/heads/"):
-            raise ValueError("target: expected a fully qualified branch ref")
+        if type(self.target) is not str or not (LANE_REF.fullmatch(self.target) or (self.target.startswith("refs/heads/") and len(self.target) > len("refs/heads/"))):
+            raise ValueError("target: expected a fully qualified branch ref or lane ref")
         for name in ("base", "tree", "commit"):
             digest(getattr(self, name), name, (40, 64))
         digest(self.policy_digest, "policy_digest")
@@ -254,3 +256,61 @@ class Assembly(Record):
                 raise ValueError("resolution: lane and task must be part of this assembly")
             digest(head, "resolution head", (40, 64))
             nonempty(review, "resolution review")
+
+
+def moment(value, label):
+    if type(value) not in (int, float) or value < 0:
+        raise ValueError(f"{label}: expected a nonnegative number")
+
+
+@dataclass(frozen=True)
+class Approval(Record):
+    plan_id: str
+    candidate_id: str
+    by: str
+    review: str | None
+    granted_at: float
+    expires_at: float
+    kind: ClassVar[str] = "approval"
+
+    def __post_init__(self):
+        reference(self.plan_id, "plan")
+        reference(self.candidate_id, "candidate")
+        nonempty(self.by, "by")
+        if self.review is not None:
+            nonempty(self.review, "review")
+        moment(self.granted_at, "granted_at")
+        moment(self.expires_at, "expires_at")
+        if self.expires_at <= self.granted_at:
+            raise ValueError("expires_at: must be later than granted_at")
+
+
+@dataclass(frozen=True)
+class Promotion(Record):
+    plan_id: str
+    receipt_id: str
+    approvals: tuple[str, ...]
+    target: str
+    old: str
+    new: str
+    tree: str
+    parents: tuple[str, ...]
+    landed_at: float
+    kind: ClassVar[str] = "promotion"
+
+    def __post_init__(self):
+        reference(self.plan_id, "plan")
+        reference(self.receipt_id, "receipt")
+        if type(self.approvals) is not tuple or len(set(self.approvals)) != len(self.approvals):
+            raise ValueError("approvals: expected an ordered tuple of distinct approval IDs")
+        for item in self.approvals:
+            reference(item, "approval")
+        if type(self.target) is not str or not (LANE_REF.fullmatch(self.target) or (self.target.startswith("refs/heads/") and len(self.target) > len("refs/heads/"))):
+            raise ValueError("target: expected a fully qualified branch ref or lane ref")
+        for name in ("old", "new", "tree"):
+            digest(getattr(self, name), name, (40, 64))
+        if type(self.parents) is not tuple or not self.parents:
+            raise ValueError("parents: expected a nonempty ordered tuple of Git object IDs")
+        for parent in self.parents:
+            digest(parent, "parent", (len(self.new),))
+        moment(self.landed_at, "landed_at")

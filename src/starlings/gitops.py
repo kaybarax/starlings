@@ -23,9 +23,9 @@ def environment(date=None):
     return env
 
 
-def git(repository, *args, ok=(0,), date=None, text=True):
+def git(repository, *args, ok=(0,), date=None, text=True, input=None):
     argv = ["git", *CONFIG, *(("-C", str(repository)) if repository is not None else ()), *args]
-    result = subprocess.run(argv, capture_output=True, text=text, env=environment(date), stdin=subprocess.DEVNULL, check=False)
+    result = subprocess.run(argv, capture_output=True, text=text, env=environment(date), input=input, stdin=subprocess.DEVNULL if input is None else None, check=False)
     if result.returncode not in ok:
         raise GitError(list(args), result.returncode, result.stderr if text else result.stderr.decode("utf-8", "replace"))
     return result
@@ -70,6 +70,15 @@ def is_ancestor(repository, ancestor, descendant):
 def update_ref(repository, ref, new, old, message="starlings"):
     result = git(repository, "update-ref", "-m", message, ref, new, old, ok=(0, 1, 128))
     return result.returncode == 0
+
+
+def ref_transaction(repository, verify, update, message="starlings"):
+    lines = ["start"]
+    lines += [f"verify {ref} {sha}" for ref, sha in verify]
+    lines += [f"update {ref} {new} {old}" for ref, new, old in update]
+    lines += ["prepare", "commit"]
+    result = git(repository, "update-ref", "-m", message, "--stdin", input="\n".join(lines) + "\n", ok=(0, 1, 128))
+    return result.returncode == 0, result.stderr.strip()
 
 
 def changed_paths(repository, old, new):

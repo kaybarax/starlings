@@ -239,7 +239,7 @@ class SelectionTests(VerifierCase):
         self.stage(fixture, {"journeys/onboarding.txt": "welcome back\n"})
         plan = self.plan(fixture)
         self.assertEqual((plan["selection"], plan["checks"]), ("full", ["journey", "ledger"]))
-        self.assertEqual(self.plan(fixture, gate="task", expected="blocked").code, "unsupported")
+        self.assertEqual(self.plan(fixture, gate="task", expected="blocked").code, "gate-disabled")
 
 
 class RunTests(VerifierCase):

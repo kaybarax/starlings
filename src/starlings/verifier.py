@@ -5,11 +5,11 @@ import os
 from pathlib import Path
 
 from . import gitops, signer
-from .batches import Failure, check_object, check_text, invalid, load_batch, refs
-from .contracts import Candidate, Evidence, Plan, Receipt
+from .batches import Failure, check_object, check_text, default_owner, invalid, load_batch, refs
+from .contracts import LANE_REF, Candidate, Evidence, Plan, Receipt
 from .policy import PolicyError, parse
 from .state import private_dir
-from .store import request_digest
+from .store import LeaseHeld, LeaseLost, request_digest
 
 TRUST_HISTORY = "SELECT * FROM trusted_policies WHERE authority = ? ORDER BY seq DESC"
 
@@ -41,7 +41,25 @@ def trusted_policy(ctx, digest):
     return parse(source.decode("utf-8"))
 
 
-def trust(ctx, authority, commit, review, supersedes=None):
+def trust_resources(ctx, authority, policy):
+    c = ctx.store.connection
+    branches = {policy["staging"], policy["release"]}
+    current = current_trust(c, authority)
+    if current is not None:
+        try:
+            previous = trusted_policy(ctx, current["digest"])
+            branches.update((previous["staging"], previous["release"]))
+        except (Failure, PolicyError, UnicodeError):
+            pass
+    lanes = set()
+    for row in c.execute("SELECT * FROM batches WHERE authority = ?", (str(authority),)).fetchall():
+        branches.update((row["staging"], row["release"]))
+        if json.loads(row["policy"])["gates"]["task"]["scope"] != "none":
+            lanes.update(f"lane:{row['name']}/{lane['name']}" for lane in c.execute("SELECT name FROM lanes WHERE batch = ?", (row["name"],)).fetchall())
+    return sorted(f"target:{authority}:refs/heads/{branch}" for branch in branches) + sorted(lanes)
+
+
+def trust(ctx, authority, commit, review, supersedes=None, owner=None, seconds=600):
     authority = authority_path(authority)
     check_object(commit, "--commit")
     check_text(review, "--review")
@@ -68,7 +86,31 @@ def trust(ctx, authority, commit, review, supersedes=None):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, blob)
+    owner = owner or default_owner()
+    leases = []
+    try:
+        for resource in trust_resources(ctx, authority, policy):
+            leases.append(ctx.store.acquire(resource, owner, seconds))
+    except LeaseHeld as exc:
+        for lease in leases:
+            ctx.store.release(lease)
+        raise Failure("blocked", "lease-held", f"{exc}; policy trust waits for the promotion or assembly holding it; retry") from exc
+    try:
+        return record_trust(ctx, authority, commit, review, supersedes, digest, blob, policy, leases)
+    except LeaseLost as exc:
+        raise Failure("stale", "lease-lost", str(exc)) from exc
+    finally:
+        for lease in leases:
+            try:
+                ctx.store.release(lease)
+            except LeaseLost:
+                pass
+
+
+def record_trust(ctx, authority, commit, review, supersedes, digest, blob, policy, leases):
     with ctx.store.transaction() as c:
+        for lease in leases:
+            ctx.store.check(c, lease)
         current = current_trust(c, authority)
         if current is not None and current["digest"] == digest and supersedes in (None, digest):
             repeated, row = True, current
@@ -145,11 +187,29 @@ def staging_candidate(c, b, candidate_id):
     return candidate, row["ref"], {}
 
 
+def task_candidate(c, b, candidate_id):
+    if candidate_id is not None:
+        row = c.execute("SELECT * FROM task_candidates WHERE id = ? AND batch = ?", (candidate_id, b["name"])).fetchone()
+        if row is None:
+            raise invalid(f"unknown task candidate {candidate_id!r} in batch {b['name']!r}")
+    else:
+        row = c.execute("SELECT * FROM task_candidates WHERE batch = ? AND state = 'pending' ORDER BY created DESC, id LIMIT 1", (b["name"],)).fetchone()
+        if row is None:
+            raise invalid(f"batch {b['name']!r} has no pending task candidate; run starlings lane assemble with an enabled task gate first")
+    if row["state"] != "pending":
+        raise Failure("blocked", "not-pending", f"task candidate {row['id']} is {row['state']}, not pending")
+    record = json.loads(row["record"])
+    fields = {key: value for key, value in record.items() if key not in ("schema", "kind", "id")}
+    fields["parents"] = tuple(fields["parents"])
+    candidate = Candidate(**fields)
+    if candidate.id != row["id"]:
+        raise Failure("invalid", "invalid", f"stored candidate record does not match {row['id']}")
+    return candidate, row["ref"], {"lane": row["lane"], "task": row["task"]}
+
+
 def plan(ctx, batch, gate, candidate_id=None):
     if gate not in ("task", "staging", "release"):
         raise invalid("--gate: expected task, staging or release")
-    if gate == "task":
-        raise Failure("blocked", "unsupported", "task gate planning is not wired yet (milestone 4); plan the staging or release gate")
     c = ctx.store.connection
     b = load_batch(c, batch)
     trusted = current_trust(c, b["authority"])
@@ -165,8 +225,10 @@ def plan(ctx, batch, gate, candidate_id=None):
         raise Failure("blocked", "unsupported", f"the {gate} gate uses executor {config['executor']!r}; only local execution is implemented")
     if gate == "release":
         if candidate_id is not None:
-            raise invalid("--candidate applies only to the staging gate; release planning constructs its own candidate")
+            raise invalid("--candidate applies only to the staging and task gates; release planning constructs its own candidate")
         candidate, ref, frozen = release_candidate(ctx, b, policy)
+    elif gate == "task":
+        candidate, ref, frozen = task_candidate(c, b, candidate_id)
     else:
         candidate, ref, frozen = staging_candidate(c, b, candidate_id)
     mirror = Path(b["mirror"])
@@ -264,10 +326,11 @@ def assess(ctx, receipt_id, target=None):
     trusted = current_trust(c, row["authority"])
     if trusted is None or trusted["digest"] != record.policy_digest:
         stale_reasons.append(f"policy {record.policy_digest} is no longer the trusted policy for {row['authority']}" + (f" (now {trusted['digest']})" if trusted else ""))
-    head = gitops.resolve(Path(row["authority"]), record.target)
+    repository = Path(c.execute("SELECT mirror FROM batches WHERE name = ?", (plan_row["batch"],)).fetchone()["mirror"]) if LANE_REF.fullmatch(record.target) else Path(row["authority"])
+    head = gitops.resolve(repository, record.target)
     if head != record.base:
-        stale_reasons.append(f"{record.target} in the authority is {head}, not the receipt base {record.base}")
-    status = "invalid" if invalid_reasons else "stale" if stale_reasons else "failed" if record.outcome != "passed" else "valid"
+        stale_reasons.append(f"{record.target} in the {'coordinator mirror' if LANE_REF.fullmatch(record.target) else 'authority'} is {head}, not the receipt base {record.base}")
+    status = "invalid" if invalid_reasons else "failed" if record.outcome != "passed" else "stale" if stale_reasons else "valid"
     reasons = invalid_reasons + stale_reasons + (["receipt records a failed outcome"] if record.outcome != "passed" else [])
     return status, {"receipt_id": receipt_id, "status": status, "outcome": record.outcome, "reasons": reasons, "plan_id": record.plan_id, "run_id": row["run_id"], "candidate_id": record.candidate_id, "target": record.target, "expected_target": expected, "base": record.base, "authority_head": head, "policy_digest": record.policy_digest, "trusted_digest": trusted["digest"] if trusted else None, "verifier": record.verifier, "current_fingerprint": current_fingerprint, "authorizes": status == "valid", "receipt": record.to_dict()}
 
