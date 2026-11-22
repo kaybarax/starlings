@@ -53,3 +53,17 @@ def prepare(checkout, root):
     if not database.exists():
         os.close(os.open(database, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
     return layout(checkout, root)
+
+
+def private_dir(root, *parts):
+    path = Path(root)
+    for part in parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError(f"state entry must not be a symlink: {path}")
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            if not path.is_dir():
+                raise ValueError(f"state entry must be a directory: {path}") from None
+    return path

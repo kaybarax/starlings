@@ -4,6 +4,10 @@ import tomllib
 PRESETS = ("release-only", "combined-lanes-release", "each-lane-release", "every-task-lane-release")
 
 
+RESOURCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
+IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
+
+
 class PolicyError(ValueError):
     pass
 
@@ -35,7 +39,7 @@ def strings(value, path, nonempty=True):
 
 
 def validate(data):
-    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly",))
+    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest"))
     require(type(data["schema"]) is int and data["schema"] == 1, "schema", "only integer schema version 1 is supported")
     text(data["project"], "project")
     for key in ("staging", "release"):
@@ -84,7 +88,30 @@ def validate(data):
         require(type(value) is int and low <= value <= high, f"limits.{name}", f"expected an integer between {low} and {high}, not a boolean")
     for name, gate in data["gates"].items():
         require(not (gate["scope"] != "none" and gate.get("environment") == "guest" and data["limits"]["max_guests"] == 0), f"gates.{name}.environment", "guest gates require limits.max_guests >= 1")
+    for section in ("selection", "artifacts", "exclusive"):
+        if section not in data:
+            continue
+        require(type(data[section]) is dict, section, "expected a table of check IDs to arrays")
+        for name, entries in data[section].items():
+            path = f"{section}.{name}"
+            require(name in checks, section, f"unknown check ID {name!r}")
+            strings(entries, path)
+            for i, entry in enumerate(entries):
+                if section == "exclusive":
+                    require(bool(RESOURCE.fullmatch(entry)), f"{path}[{i}]", "expected a resource name of lowercase letters, digits, dots, hyphens or underscores, for example port-5432")
+                elif section == "artifacts":
+                    require(relative(entry) and not any(c in entry for c in "*?[\\"), f"{path}[{i}]", "expected a normalized relative file path without glob characters")
+                else:
+                    require(not entry.startswith("/") and entry == entry.strip(), f"{path}[{i}]", "expected a relative path glob without surrounding whitespace")
+    if "guest" in data:
+        table(data["guest"], "guest", ("image",))
+        require(type(data["guest"]["image"]) is str and bool(IMAGE.fullmatch(data["guest"]["image"])), "guest.image", "expected an image pinned by digest, name@sha256:<64 lowercase hex>")
+    require("guest" in data or not any(gate["scope"] != "none" and gate.get("environment") == "guest" for gate in data["gates"].values()), "guest.image", "required when an enabled gate uses environment guest")
     return data
+
+
+def relative(path):
+    return not path.startswith("/") and all(part not in ("", ".", "..") for part in path.split("/"))
 
 
 def parse(source):
@@ -113,7 +140,7 @@ def render(data):
     def value(item):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
     lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release")]
-    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), ("limits", data["limits"])]:
+    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest") if section in data), ("limits", data["limits"])]:
         lines.extend(["", f"[{section}]"])
         lines.extend(f"{key} = {value(item)}" for key, item in entries.items())
     return "\n".join(lines) + "\n"

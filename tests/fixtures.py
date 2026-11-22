@@ -33,8 +33,8 @@ def policy_text(scope="none", mode="each-lane", excluded=EXCLUDED):
 
 
 class Fixture:
-    def __init__(self, scope="none", mode="each-lane", excluded=EXCLUDED):
-        self.temporary = tempfile.TemporaryDirectory(prefix="starlings-fixture-")
+    def __init__(self, scope="none", mode="each-lane", excluded=EXCLUDED, policy=None, files=None, parent=None):
+        self.temporary = tempfile.TemporaryDirectory(prefix="starlings-fixture-", dir=parent)
         self.root = Path(self.temporary.name).resolve()
         self.authority = self.root / "authority.git"
         git(self.root, "init", "--quiet", "--bare", "--initial-branch=dev", str(self.authority))
@@ -43,13 +43,18 @@ class Fixture:
         (seed / "ledger.txt").write_text("total = 0\n")
         (seed / "reports.txt").write_text("report = empty\n")
         (seed / "shared.txt").write_text("alpha\nbeta\ngamma\n")
+        for path, content in (files or {}).items():
+            (seed / path).parent.mkdir(parents=True, exist_ok=True)
+            (seed / path).write_text(content)
+        if policy is not None:
+            (seed / "starlings.toml").write_text(policy)
         git(seed, "add", ".")
         git(seed, "commit", "--quiet", "-m", "seed")
         git(seed, "push", "--quiet", str(self.authority), "dev:refs/heads/dev", "dev:refs/heads/main")
         self.seed = seed
         self.project = self.root / "project"
         self.project.mkdir()
-        (self.project / "starlings.toml").write_text(policy_text(scope, mode, excluded))
+        (self.project / "starlings.toml").write_text(policy if policy is not None else policy_text(scope, mode, excluded))
         self.state = self.root / "state"
         self.clock = None
         self.hook = None

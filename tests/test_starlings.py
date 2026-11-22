@@ -173,12 +173,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(candidate.id, "candidate:" + hashlib.sha256(encoded).hexdigest())
         other = Candidate("repo", "/authority.git", "refs/heads/main", "a" * 40, ("e" * 40,), "c" * 40, "d" * 40)
         self.assertNotEqual(candidate.id, other.id)
-        plan = Plan(candidate.id, "f" * 64, "release", ("example",), "local", "native")
+        plan = Plan(candidate.id, "f" * 64, "release", ("example",), "local", "native", "full", "a" * 64)
         evidence = Evidence(plan.id, "example", 0, "e" * 64)
         adapter = Adapter("local", "1", ("inspect",))
         self.assertEqual(len({x.id for x in (candidate, plan, evidence, adapter)}), 4)
-        for record in (candidate, plan, evidence, adapter):
+        for record in (candidate, evidence, adapter):
             self.assertEqual(record.to_dict()["schema"], 1)
+        self.assertEqual(plan.to_dict()["schema"], 2)
         with self.assertRaises(ValueError):
             Evidence(plan.id, "example", True, "e" * 64)
 

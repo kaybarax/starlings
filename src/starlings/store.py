@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 import time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS requests(scope TEXT NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(scope, key));
@@ -37,6 +37,27 @@ CREATE TABLE IF NOT EXISTS candidates(
 CREATE TABLE IF NOT EXISTS stage_resolutions(
     candidate TEXT PRIMARY KEY REFERENCES candidates(id), batch TEXT NOT NULL REFERENCES batches(name), lanes TEXT NOT NULL,
     head TEXT NOT NULL, review TEXT NOT NULL, base TEXT NOT NULL, ref TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS trusted_policies(
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, authority TEXT NOT NULL, digest TEXT NOT NULL, commit_sha TEXT NOT NULL,
+    review TEXT NOT NULL, previous_digest TEXT, trusted_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS release_candidates(
+    id TEXT PRIMARY KEY, batch TEXT NOT NULL REFERENCES batches(name), staging_head TEXT NOT NULL, release_head TEXT NOT NULL,
+    commit_sha TEXT NOT NULL, tree TEXT NOT NULL, ref TEXT NOT NULL, record TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS plans(
+    id TEXT PRIMARY KEY, batch TEXT NOT NULL REFERENCES batches(name), gate TEXT NOT NULL, candidate_id TEXT NOT NULL,
+    candidate TEXT NOT NULL, record TEXT NOT NULL, policy TEXT NOT NULL, authority TEXT NOT NULL, target TEXT NOT NULL,
+    changed TEXT NOT NULL, unmapped TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS runs(
+    id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), owner TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'cancelled', 'interrupted', 'failed')),
+    cancel_requested INTEGER NOT NULL DEFAULT 0, reason TEXT, receipt_id TEXT, started REAL NOT NULL, finished REAL);
+CREATE TABLE IF NOT EXISTS evidence(
+    run_id TEXT NOT NULL REFERENCES runs(id), check_id TEXT NOT NULL, position INTEGER NOT NULL, evidence_id TEXT NOT NULL,
+    status TEXT NOT NULL, exit_code INTEGER NOT NULL, record TEXT NOT NULL, files TEXT NOT NULL, metrics TEXT NOT NULL,
+    PRIMARY KEY(run_id, check_id));
+CREATE TABLE IF NOT EXISTS receipts(
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), plan_id TEXT NOT NULL REFERENCES plans(id),
+    authority TEXT NOT NULL, outcome TEXT NOT NULL, record TEXT NOT NULL, signature TEXT NOT NULL, issued_at REAL NOT NULL);
 """
 
 
@@ -71,6 +92,8 @@ class Store:
             versions = [row[0] for row in c.execute("SELECT version FROM schema_version")]
             if not versions:
                 c.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+            elif versions == [1]:
+                c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
             elif versions != [SCHEMA_VERSION]:
                 raise ValueError(f"unsupported state database schema version {versions}")
 
@@ -127,3 +150,24 @@ class Store:
             deleted = c.execute("DELETE FROM leases WHERE resource = ? AND token = ?", (lease["resource"], lease["token"])).rowcount
         if not deleted:
             raise LeaseLost(f"lease {lease['resource']} is no longer owned by {lease['owner']}; release refused")
+
+    def acquire_set(self, groups, owner, seconds):
+        if not 0 < seconds <= 86400:
+            raise ValueError("lease seconds must be between 1 and 86400")
+        with self.transaction() as c:
+            now = self.clock()
+            chosen = []
+            for group in groups:
+                for resource in group:
+                    row = c.execute("SELECT expires FROM leases WHERE resource = ?", (resource,)).fetchone()
+                    if row is None or row["expires"] <= now:
+                        chosen.append(resource)
+                        break
+                else:
+                    return None
+            leases = []
+            for resource in chosen:
+                token = secrets.token_hex(16)
+                c.execute("INSERT OR REPLACE INTO leases(resource, owner, token, acquired, expires) VALUES (?, ?, ?, ?, ?)", (resource, owner, token, now, now + seconds))
+                leases.append({"resource": resource, "owner": owner, "token": token, "expires": now + seconds, "taken_over": False})
+            return leases

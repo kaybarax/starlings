@@ -70,13 +70,17 @@ class Plan(Record):
     checks: tuple[str, ...]
     executor: str
     environment: str
+    selection: str
+    inputs_digest: str
+    schema: ClassVar[int] = 2
     kind: ClassVar[str] = "plan"
 
     def __post_init__(self):
         reference(self.candidate_id, "candidate")
         digest(self.policy_digest, "policy_digest")
-        if self.gate not in ("task", "staging", "release") or self.executor not in ("local", "github") or self.environment not in ("native", "guest"):
-            raise ValueError("plan: invalid gate, executor or environment")
+        digest(self.inputs_digest, "inputs_digest")
+        if self.gate not in ("task", "staging", "release") or self.executor not in ("local", "github") or self.environment not in ("native", "guest") or self.selection not in ("full", "affected", "expanded"):
+            raise ValueError("plan: invalid gate, executor, environment or selection")
         if type(self.checks) is not tuple or not self.checks:
             raise ValueError("checks: expected a nonempty ordered tuple")
         for check in self.checks:
@@ -99,6 +103,83 @@ class Evidence(Record):
         if type(self.exit_code) is not int or not -255 <= self.exit_code <= 255:
             raise ValueError("exit_code: expected an integer between -255 and 255")
         digest(self.artifact_digest, "artifact_digest")
+
+
+@dataclass(frozen=True)
+class Receipt(Record):
+    candidate_id: str
+    plan_id: str
+    target: str
+    base: str
+    commit: str
+    tree: str
+    policy_digest: str
+    outcome: str
+    evidence: tuple[str, ...]
+    artifacts: tuple[tuple[str, str], ...]
+    verifier: dict
+    executor: str
+    environment: str
+    toolchain: dict
+    issued_at: float
+    kind: ClassVar[str] = "receipt"
+
+    def __post_init__(self):
+        reference(self.candidate_id, "candidate")
+        reference(self.plan_id, "plan")
+        if type(self.target) is not str or not self.target.startswith("refs/heads/") or len(self.target) <= len("refs/heads/"):
+            raise ValueError("target: expected a fully qualified branch ref")
+        for name in ("base", "tree", "commit"):
+            digest(getattr(self, name), name, (40, 64))
+        digest(self.policy_digest, "policy_digest")
+        if self.outcome not in ("passed", "failed"):
+            raise ValueError("outcome: expected passed or failed")
+        if type(self.evidence) is not tuple or not self.evidence:
+            raise ValueError("evidence: expected a nonempty ordered tuple of evidence IDs")
+        for item in self.evidence:
+            reference(item, "evidence")
+        if type(self.artifacts) is not tuple:
+            raise ValueError("artifacts: expected an ordered tuple of (path, sha256)")
+        paths = []
+        for item in self.artifacts:
+            if type(item) is not tuple or len(item) != 2:
+                raise ValueError("artifact: expected (path, sha256)")
+            nonempty(item[0], "artifact path")
+            if item[0].startswith("/") or any(part in ("", ".", "..") for part in item[0].split("/")):
+                raise ValueError("artifact path: expected a normalized relative path")
+            digest(item[1], "artifact digest")
+            paths.append(item[0])
+        if len(set(paths)) != len(paths):
+            raise ValueError("artifacts: duplicate path")
+        if type(self.verifier) is not dict or set(self.verifier) != {"version", "fingerprint"}:
+            raise ValueError("verifier: expected version and fingerprint")
+        for value in self.verifier.values():
+            nonempty(value, "verifier")
+        if self.executor not in ("local", "github") or self.environment not in ("native", "guest"):
+            raise ValueError("receipt: invalid executor or environment")
+        if type(self.toolchain) is not dict or set(self.toolchain) != {"python", "git", "platform", "guest_image"}:
+            raise ValueError("toolchain: expected python, git, platform and guest_image")
+        for key in ("python", "git", "platform"):
+            nonempty(self.toolchain[key], key)
+        if self.toolchain["guest_image"] is not None:
+            nonempty(self.toolchain["guest_image"], "guest_image")
+        if type(self.issued_at) not in (int, float) or self.issued_at < 0:
+            raise ValueError("issued_at: expected a nonnegative number")
+
+    @classmethod
+    def from_dict(cls, data):
+        if type(data) is not dict or data.get("kind") != cls.kind or data.get("schema") != cls.schema:
+            raise ValueError("receipt: unexpected kind or schema")
+        fields = {key: value for key, value in data.items() if key not in ("schema", "kind", "id")}
+        fields["evidence"] = tuple(fields.get("evidence") or ())
+        fields["artifacts"] = tuple(tuple(item) if type(item) is list else item for item in fields.get("artifacts") or ())
+        record = cls(**fields)
+        if data.get("id") != record.id:
+            raise ValueError("receipt: content ID does not match the record")
+        return record
+
+    def payload(self):
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
 @dataclass(frozen=True)
