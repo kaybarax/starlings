@@ -2,28 +2,32 @@
 
 Choose when and where CI runs for a software engineering agent swarm.
 
-## Status
+Starlings facilitates running CI locally for a swarm of software engineering agents, instead of on paid hosted CI services such as GitHub Actions and the like. It is not a CI system itself. It is a workflow for CI runs and integration checks across many worktrees. As the swarm's work moves from task worktrees into lanes, onto a staging branch and finally onto a release branch, you decide at which of those steps your checks run, and Starlings schedules them on your machine within the CPU, memory and time it has. Nothing lands on a gated branch without a signed, passing result for that exact commit.
 
-**Under active development, not yet released.** Local milestones 1–5 of 6 are complete; the optional GitHub milestone is offline-qualified against a deterministic local fake host and its live adapter is implemented, but a passing hosted run has not been recorded — hosted execution stays unsupported until it is qualified. Commands, the policy schema and file formats can still change, so do not rely on starlings for real projects yet.
+Version 0.1.0 is the first release, and it covers the complete local workflow. Coordinating gates on hosted CI (GitHub Actions) is included as an experimental option that has not been tested end to end yet. See [Hosted checks on GitHub](#hosted-checks-on-github-experimental).
 
-| Milestone | What it delivers | Status |
-| --- | --- | --- |
-| 1. Contracts and package | Installable wheel, CLI, policy schema and presets | Done |
-| 2. Local assembly | Batches, task worktrees, handoff, lane assembly and freeze | Done |
-| 3. Verifier and runner | Gate planning, check execution, signed receipts, stale-result checks | Done |
-| 4. Promotion and recovery | Guarded landing on staging and release, recovery after an interruption | Done |
-| 5. Local qualification | Four lanes and 32 tasks under every preset, with benchmarks | Done (local) |
-| 6. Optional GitHub operation | Hosted checks on GitHub Actions and pull request publishing | Done (offline; live adapter unqualified) |
+**Why the name?** A flock of starlings in flight is called a murmuration: thousands of birds turning and regrouping together as one, without colliding. An agent swarm at work looks much the same, and Starlings exists to keep it organized as it moves.
 
-This table is updated as each milestone is completed. Everything below describes the local path: a local bare Git repository as the authority, with checks run on your own machine. The one unfinished piece of the optional milestone — a passing hosted gate against a real GitHub remote — is noted where it appears.
+## Why Starlings
 
-## Why starlings
+An agent swarm produces a lot of parallel work. Whether it comes from one harness or several, and whether its subagents work side by side or one after another, it all ends up in worktrees whose changes must be merged into `dev` and eventually into `main`. If every one of those branches triggers a full run on a paid hosted CI service, the bill and the waiting time grow with every task and every lane.
 
-Coding agents make it cheap to run many tasks at once. Each task produces a branch, and if every branch triggers a full CI run, cost and waiting time multiply with every task and every lane of work.
+Starlings makes it practical to run those checks on your own machine instead. Local runs carry no service cost, and Starlings keeps them efficient, robust and fast. You also choose where CI sits in the flow to match the compute you have: with CI only at release, a batch of 32 tasks across four lanes needs one CI run, and with CI at every step the same batch needs 37. Checks are admitted against the CPU slots, guest slots and exclusive resources you configure, so the swarm never asks more of the machine than it has.
 
-Starlings lets you decide which steps are verified. Work moves from a task, to a lane, to a staging branch, to a release branch. You pick which of those three transitions run checks, and starlings makes sure nothing lands on a gated branch without a passing result for that exact change.
+The aim is local CI that is almost as fast as hosted CI, without giving up the guarantee that every landing on a gated branch was verified. If you still want some gates to run on hosted CI, Starlings can coordinate those too.
 
-It is built for a solo engineer or small team coordinating several agents, and it works just as well for a person at a terminal.
+## Features
+
+- **CI where you want it.** Place CI at any of three transitions: task to lane, lane to staging, and staging to release.
+- **Resource-aware runs.** Checks are admitted against configured CPU slots, guest slots and exclusive resources such as ports, and wait rather than overload the machine.
+- **Isolated task worktrees.** Each task gets its own worktree and is handed off as an exact, reviewed commit.
+- **Deterministic assembly.** Lanes and staging candidates are built with `git merge-tree`, so the same inputs always produce the same commit. Conflicts, undeclared dependencies and changes to excluded paths park the task with a reason instead of landing.
+- **Signed receipts.** Check results are recorded in receipts signed with an SSH key and bound to the candidate commit, the trusted policy and the retained logs and artifacts.
+- **Guarded landing.** `promote` is the only command that advances a gated branch. It re-verifies the receipt, the trusted policy, required approvals and the branch heads, journals its intent, then lands in one atomic ref transaction.
+- **Crash recovery.** `recover` reconciles interrupted promotions, assembly steps and lost runs from the journal.
+- **Failure diagnosis.** `diagnose` re-runs a failed release gate over subsets of the frozen lanes to name the responsible task, lane or lane pair.
+- **Built for agents.** Every command accepts `--json` and returns stable identifiers and exit statuses, so harnesses and subagents can drive it directly.
+- **No dependencies.** Pure Python standard library, plus Git and OpenSSH. Works fully offline.
 
 ## How it works
 
@@ -32,31 +36,41 @@ task worktrees ──► lane branch ──► dev (staging) ──► main (rel
               task gate      staging gate       release gate
 ```
 
-Each task gets its own Git worktree. Finished tasks are collected into a lane. Finished lanes are combined onto the staging branch. The staging branch is promoted to the release branch.
+1. A **batch** pins the current staging commit as the starting point for one round of swarm work.
+2. Each **task** is assigned to an agent in its own worktree. When the work is done, its commit is handed off with a review reference.
+3. Handed-off tasks are **assembled** into their **lane** in dependency order, and the lane is **frozen**.
+4. Frozen lanes are **staged** onto the staging branch, one lane at a time or all ready lanes together.
+5. The staging branch is **planned**, **run** and **promoted** to the release branch.
 
-A gate is a set of checks that must pass before a transition happens. A policy file in your project says which gates are on. With every gate off except release, a batch of 32 tasks needs one CI run. With every gate on, the same batch needs 37.
+A **gate** is a CI run at one of those transitions: the set of checks that must pass before work moves on. The policy file in your project says where gates sit, which checks they run, and how much of the machine they may use.
 
-## Concepts
+### Concepts
 
 | Term | Meaning |
 | --- | --- |
 | Authority | The bare Git repository whose branches are the source of truth. |
 | Batch | One round of parallel work, started from a pinned staging commit. |
-| Lane | A branch that collects related tasks. One writer assembles it. |
-| Task | One unit of work, done in its own worktree and handed off as a reviewed commit. |
+| Lane | A branch that collects related tasks, for example the work of one harness or one group of subagents. One writer assembles it. |
+| Task | One unit of agent work, done in its own worktree and handed off as a reviewed commit. |
 | Candidate | The exact commit a gate plans checks against, bound to its target branch. |
-| Gate | The checks required at a transition: task, staging or release. |
+| Gate | The CI run required at a transition: task, staging or release. |
 | Policy | `starlings.toml`, the file that defines gates, checks and limits. |
 | Trusted policy | The policy version you have reviewed and registered. Only it can plan or run checks. |
 | Plan | The exact candidate and the checks that will run against it. |
-| Receipt | A signed record that a plan's checks passed. |
+| Receipt | A signed record of a plan's check results. |
 | Promote | The only command that lands a verified candidate on a gated branch. |
 
-## Install
+## Requirements
 
-Starlings needs Python 3.11 or later and has no third-party runtime dependencies. It also needs Git 2.38 or later and OpenSSH `ssh-keygen` with `-Y` signing support. Docker is optional and only used for guest checks.
+- Python 3.11 or later. There are no third-party runtime dependencies.
+- Git 2.38 or later.
+- OpenSSH `ssh-keygen` with `-Y` signing support, used to sign and verify receipts.
+- Optional: Docker, for running checks in a pinned container image.
+- Optional: the GitHub CLI `gh`, for the experimental GitHub executor.
 
-From a source checkout, `PYTHONPATH=src python3 -m starlings` runs it without installing. To install, build a wheel and put it in a fresh environment outside any checkout:
+## Installation
+
+Build a wheel from a source checkout and install it into a fresh virtual environment outside the checkout:
 
 ```sh
 uv build --offline --wheel --out-dir <wheel-dir>
@@ -65,88 +79,97 @@ python3 -m venv <venv-dir>
 <venv-dir>/bin/starlings --version
 ```
 
+To run from a source checkout without installing, use `PYTHONPATH=src python3 -m starlings`.
+
 ## Quick start
 
-`starlings demo` runs the whole release-only flow end to end in a disposable directory: it generates the example project, seeds a bare authority and drives one lane with two tasks through every step. It works offline, needs no edits and prints a short summary:
+`starlings demo` runs the whole flow end to end in a disposable directory. It generates an example project, creates a bare authority repository, and drives one lane with two tasks through assembly, staging, a release gate and promotion. It works offline and needs no setup:
 
 ```sh
-starlings demo --directory <dir>
+starlings demo --directory <empty-dir>
 ```
 
-The directory must be absent or empty; everything the demo writes stays inside it. A complete copy-and-paste version, including a failing variant, is in [docs/qualification.md](docs/qualification.md).
+The directory must be absent or empty, and everything the demo writes stays inside it. The summary ends with the new release commit and a `starlings status` command you can use to inspect the result.
 
-The same steps by hand look like this. Set up once:
+## Usage
+
+The steps below walk through the same flow by hand, using the `release-only` preset.
+
+### 1. Set up a project and authority
+
+Generate an example project (or add a `starlings.toml` to your own), commit it, and push the staging and release branches to a local bare repository that acts as the authority:
 
 ```sh
 starlings examples init <project-dir> --preset release-only
-# commit the project, create a bare repository, and push dev and main to it
 cd <project-dir>
+git init -b dev . && git add -A && git commit -m "Add starlings policy"
+git init --bare <authority-path>
+git push <authority-path> HEAD:refs/heads/dev HEAD:refs/heads/main
+```
 
+The authority path must be an absolute path to a local bare repository.
+
+### 2. Trust the policy and create a signer
+
+Choose a private state directory outside the checkout, register the reviewed policy, and create the receipt signing key:
+
+```sh
 export STARLINGS_STATE_DIR=<private-state-dir>
 starlings policy trust --authority <authority-path> --commit <policy-sha> --review <review-ref>
 starlings signer init
-starlings authority protect --authority <authority-path>   # optional: refuse direct writes to staging/release
+starlings authority protect --authority <authority-path>   # optional: refuse direct writes to staging and release
 starlings doctor --authority <authority-path>
 ```
 
-Then run a batch:
+`<policy-sha>` is the full commit ID on the authority that contains the reviewed `starlings.toml`, and `<review-ref>` is any reference to the review that approved it, such as a pull request URL.
+
+### 3. Run a batch
+
+Prepare a batch, assign tasks, and hand off their commits:
 
 ```sh
 starlings batch prepare demo --lanes work --authority <authority-path>
 starlings task assign demo feat-a --lane work --owner you
-# make and commit a change in the worktree that was returned
-
+# make and commit a change in the worktree that task assign returned
 starlings task handoff demo feat-a --head <task-sha> --review <review-ref>
+```
+
+Assemble and freeze the lane, then stage it:
+
+```sh
 starlings lane assemble demo work
 starlings lane freeze demo work
 starlings stage demo --lanes work
+starlings status demo
+```
 
+### 4. Verify and release
+
+Plan the release gate, run its checks, confirm the receipt, and promote:
+
+```sh
 starlings plan demo --gate release
 starlings run <plan-id>
 starlings check <receipt-id>
 starlings promote <plan-id> --receipt <receipt-id>
 ```
 
-The authority path must be an absolute path to an existing local bare repository. The example project ships real `unittest` checks. A manifest created with `starlings init` contains a placeholder check that fails on purpose, so replace it with your project's own commands before use.
+If the run fails, `starlings diagnose demo --gate release --receipt <receipt-id>` narrows the failure to a task, lane or lane pair. If anything is interrupted, `starlings recover demo` reconciles the batch.
 
 ## Presets
 
-`starlings init --preset <name> --preview` shows a complete `starlings.toml`. Add `--write` to create it; an existing file is never replaced. `starlings examples init --preset <name>` generates a working example project for the same preset.
+Presets are ready-made policies. Preview one with `starlings init --preset <name> --preview`, and add `--write` to create `starlings.toml` (an existing file is never replaced). `starlings examples init <dir> --preset <name>` generates a complete working example project for the same preset.
 
 | Preset | Task gate | Staging gate | Release gate | Choose it when |
 | --- | --- | --- | --- | --- |
-| `release-only` | off | off | full | You want the fewest runs and accept that staging can be broken until release. |
-| `combined-lanes-release` | off | full, all ready lanes together | full | You want one early signal that the lanes work together. |
-| `each-lane-release` | off | full, one per lane | full | You want to know which lane broke staging. |
-| `every-task-lane-release` | full | full, one per lane | full | You have machine capacity to spare and want the earliest feedback. |
+| `release-only` | off | off | full | Compute is tight and you want the fewest CI runs, accepting that staging can be broken until release. |
+| `combined-lanes-release` | off | full, all ready lanes together | full | You can afford one extra run for an early signal that the lanes work together. |
+| `each-lane-release` | off | full, one per lane | full | You can afford a run per lane and want to know which lane broke staging. |
+| `every-task-lane-release` | full | full, one per lane | full | You have compute to spare and want the earliest feedback on every task. |
 
-## Using starlings with coding agents
+The policy written by `starlings init` contains a placeholder check that fails on purpose. Replace it with your project's own commands before use.
 
-Agents use the same commands as a person. Add `--json` to any command for a structured result with stable identifiers, and rely on the exit status to tell success from pending, blocked, stale or failed work.
-
-A typical split of roles:
-
-- A **coordinator** prepares the batch, assigns each task to a worker with the repository, batch, lane, task, worktree and policy revision, then assembles and freezes lanes, stages and promotes.
-- A **worker** receives a worktree from `task assign`, commits its change there, and reports the exact commit for `task handoff`; it never plans, runs or promotes.
-
-`starlings authority protect --authority <authority-path>` installs a generated update hook into the authority that refuses writes to the recorded staging and release refs unless they match an intent starlings journaled first — a raw `git push` or `git update-ref` to those branches fails while `stage` and `promote` keep working. This guards against drift and accidents: a same-login agent that deliberately edits, deletes or bypasses the hook can still write the refs directly, so keep telling your agents in your project's instruction files to use starlings for every merge and never to write to lane, staging or release branches directly. `starlings doctor --authority <authority-path>` reports whether the hook is installed, unmodified and recorded.
-
-**Planned:** ready-made instruction templates for specific agent tools, and a hosted qualification that records a passing gate on real GitHub Actions (the offline fake-host qualification is done and the live adapter is implemented, but unqualified).
-
-## Commands
-
-| Group | Commands | Purpose |
-| --- | --- | --- |
-| Setup and policy | `init`, `policy show`, `policy validate`, `policy trust`, `signer init`, `examples init`, `demo`, `authority protect`, `doctor` | Create project files, register the policy, manage the signer, run the demo, harden the authority and diagnose the setup. |
-| Batch, tasks and lanes | `batch prepare`, `task assign`, `task handoff`, `lane assemble`, `lane resolve`, `lane freeze`, `stage`, `status` | Move work from task worktrees into lanes and onto staging. |
-| Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks, and validate the receipt. |
-| Diagnostics | `diagnose` | Rebuild frozen lane subsets of a failed release candidate and re-run the failed checks to name the responsible task or lane pair; results never authorize a promotion. |
-| Publishing | `templates github` | Preview or exclusively write the optional GitHub caller and reusable check workflows into `.github/workflows`; nothing touches `.github` unless asked. |
-| Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate, and reconcile after an interruption. |
-
-Exit statuses are stable and documented in [docs/policy.md](docs/policy.md). Full options and semantics are in [docs/operations.md](docs/operations.md).
-
-## Policy
+## Configuration
 
 `starlings.toml` lives in your project and is reviewed like code. A minimal release-only policy looks like this:
 
@@ -158,7 +181,7 @@ release = "main"               # release branch; only promote advances it
 fully_verified_release = true  # requires release scope "full"
 
 [authority]
-mode = "local-bare"            # the only supported authority
+mode = "local-bare"
 
 [gates.task]
 scope = "none"                 # none | affected | full
@@ -169,8 +192,8 @@ scope = "none"
 
 [gates.release]
 scope = "full"
-executor = "local"
-environment = "native"         # or "guest" with a pinned [guest] image
+executor = "local"             # local | github (experimental)
+environment = "native"         # native | guest (pinned Docker image)
 checks = ["unit", "service"]
 
 [checks]                       # check ID -> argv array, never a shell string
@@ -185,30 +208,70 @@ max_guests = 0
 timeout_seconds = 1800
 ```
 
-Checks are argument lists, never shell strings. Validation checks the structure of the file only. It does not run your commands or judge whether they give enough coverage. Use `starlings init --preview` for the authoritative rendered example, and see [docs/policy.md](docs/policy.md) for the full schema.
+The `[limits]` table sizes CI to your machine: `cpu_slots` and `max_guests` bound how many checks run at once across the swarm, and `timeout_seconds` bounds each check. Optional tables add path-based check selection for scope `affected` (`[selection]`), required artifacts (`[artifacts]`), exclusive resources such as ports (`[exclusive]`), excluded paths for assembly (`[assembly]`), required approvals per gate, a pinned guest image (`[guest]`) and GitHub settings (`[github]`). Run `starlings policy validate` to check the file's structure. The full schema is in [docs/policy.md](docs/policy.md).
 
 ## State and trust
 
-Starlings keeps its database, worktrees, logs, trusted policies, receipts and signing key in a private state directory, separate from your checkout. Set it with `--state-dir` or `STARLINGS_STATE_DIR`; `doctor` inspects the default `~/.local/state/starlings` without creating it.
+Starlings keeps its database, worktrees, logs, trusted policies, receipts and signing key in a private state directory, separate from your checkout. Set it with `--state-dir` or `STARLINGS_STATE_DIR`. The default is `~/.local/state/starlings`.
 
-Three things carry trust: the policy version you registered with `policy trust`, the signing key created by `signer init`, and the receipts that key signs. `check` and `promote` verify all of them again before anything lands.
+Three things carry trust: the policy version registered with `policy trust`, the signing key created by `signer init`, and the receipts that key signs. `check` and `promote` verify all of them again before anything lands. The signing key is stored unencrypted and is protected only by the state directory's permissions.
 
-The signing key is stored unencrypted and is protected only by the state directory's permissions.
+## Roles in the swarm
+
+Agents drive Starlings through the CLI. Add `--json` to any command for a structured result, and use the exit status to tell success from pending, blocked, stale or failed work.
+
+A typical split of roles:
+
+- A **coordinator agent** prepares the batch and assigns each task to a worker, then assembles and freezes lanes, stages, and runs the gates and promotions.
+- A **worker agent** receives a worktree from `task assign`, commits its change there, and reports the exact commit for `task handoff`. It never plans, runs or promotes.
+
+Workers can come from one harness or several. Tell your agents in your project's instruction files to use Starlings for every merge and never to write to lane, staging or release branches directly. `starlings authority protect` installs a hook in the authority that refuses direct writes to the staging and release branches, which guards against mistakes and drift.
+
+## Commands
+
+| Group | Commands | Purpose |
+| --- | --- | --- |
+| Setup and policy | `init`, `policy show`, `policy validate`, `policy trust`, `signer init`, `examples init`, `demo`, `authority protect`, `doctor` | Create project files, register the policy, manage the signer, run the demo, protect the authority and check the setup. |
+| Batch, tasks and lanes | `batch prepare`, `task assign`, `task handoff`, `lane assemble`, `lane resolve`, `lane freeze`, `stage`, `status` | Move work from task worktrees into lanes and onto staging. |
+| Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks and validate the receipt. |
+| Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate and reconcile after an interruption. |
+| Diagnostics | `diagnose` | Find the task or lane responsible for a failed release gate. Results never authorize a promotion. |
+| Publishing | `templates github` | Preview or write the GitHub workflow templates used by the GitHub executor. |
+
+Run `starlings <command> --help` for options. Exit statuses are listed in [docs/policy.md](docs/policy.md#output-and-exit-statuses), and full command semantics are in [docs/operations.md](docs/operations.md).
+
+## Hosted checks on GitHub (experimental)
+
+Starlings can also coordinate gates that run on hosted CI, so you can keep some checks there while the rest run locally. The supported host today is GitHub Actions: staging and release gates can set `executor = "github"` to run their checks there through the `gh` CLI, with results bound into the same signed receipts. `starlings templates github` generates the workflow files this needs.
+
+This executor is implemented but has not yet been tested end to end against GitHub, so treat it as unsupported in 0.1.0 and use the local executor for real work. By default a `[github]` policy uses a local simulated host (`adapter = "fake"`) that exercises the workflow without contacting GitHub. The task gate always runs locally. Details are in [docs/operations.md](docs/operations.md#hosted-execution).
 
 ## Limitations
 
-- **Local only.** In v1 the authority must be a local bare repository. Remote authorities and deployment are unsupported. Staging and release gates may name executor `github` with an optional `[github]` table. The default `fake` adapter is a deterministic local simulation, offline-qualified for routing, receipt binding, dispositions and lost-response recovery only; it proves nothing about real event delivery, protections or runner parity. `adapter = "github"` is implemented and submits real checks through the `gh` CLI, but it is unqualified. A rehearsal against a private repository proved dispatch, routing, result-artifact binding and pull-request dispositions; a passing hosted gate could not be exercised during rehearsal. Hosted execution stays unsupported until someone qualifies it — issues are welcome. The task gate stays local-only (`plan` blocks `unsupported`), and hosted checks require environment `native`. See [docs/policy.md](docs/policy.md) and the hosted-execution section of [docs/operations.md](docs/operations.md).
-- **Hook-based enforcement only.** `authority protect` refuses unrecorded writes to staging and release refs via a generated authority hook, but a same-login user or agent can still edit or delete the hook, run git with hooks disabled, or use an unprotected authority. It guards drift and accidents, not credentials.
-- **One coordinator machine.** Checks within a run execute one after another; task worktrees are not cleaned up automatically; assembly leases do not supervise processes.
-- **Native checks are trusted.** They run as you and can read the state directory, including the signing key. `memory_mib` and `disk_mib` are recorded, not enforced, and a descendant that calls `setsid`/`setpgid` escapes process-group tracking. Use native execution only for contributors you trust.
-- **Guest checks are not a security boundary.** They run in a pinned Docker container (`--network none`, `name@sha256:` image), qualified on one recorded Colima profile; other docker hosts and images are unqualified.
-- **Recovery has gaps.** Lane-ref/journal divergence that no include intent explains is reported as stale rather than reconciled, and ungated staging recovery covers only the lost-acknowledgement and externally-landed cases.
-- **Validation is structural.** `policy validate` checks the file's shape, not command safety, availability or coverage. Qualification covers local execution on the recorded profile only; results are honest local measurements with no asserted thresholds — see [docs/qualification.md](docs/qualification.md).
+- **Local authority only.** The authority must be a local bare Git repository. Remote authorities and deployment are out of scope.
+- **One coordinator machine.** All CI runs on the machine that holds the state directory. Checks within one run execute one after another (separate runs share the configured slots), and task worktrees are not cleaned up automatically.
+- **Hook protection is not access control.** `authority protect` refuses unrecorded writes to staging and release, but anyone with the same login can edit or bypass the hook.
+- **Native checks are trusted.** They run as your user and can read the state directory, including the signing key. Memory and disk limits are recorded, not enforced. Use native checks only for agent work you trust to run as you.
+- **Guest checks are not a security boundary.** They run in a pinned Docker image with no network, and have been verified on one Docker setup only.
+- **Validation is structural.** `policy validate` checks the file's shape, not whether your commands are safe or give enough coverage.
+- **Tested platform.** 0.1.0 has been tested on macOS (Apple Silicon). Other platforms have not been verified yet.
 
-## Contributing
+## Documentation
 
-Bug reports, documentation, checks and host-adapter work are welcome; qualifying the hosted GitHub adapter is the known open area. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, conventions and the pull-request process.
+- [docs/operations.md](docs/operations.md): full behaviour of every command.
+- [docs/policy.md](docs/policy.md): policy schema, record formats, state directory and exit statuses.
+- [docs/release-runbook.md](docs/release-runbook.md): building, installing, validating and recovering.
+- [docs/qualification.md](docs/qualification.md): how Starlings was tested, with benchmarks and supported profiles.
+
+## Development
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+ruff check .
+```
+
+Contributor conventions are in [AGENTS.md](AGENTS.md).
 
 ## License
 
-Starlings is licensed under the Apache License 2.0. See `LICENSE`. Attribution must be retained as described in `NOTICE`.
+Starlings is licensed under the Apache License 2.0. See [LICENSE](LICENSE). Attribution must be retained as described in [NOTICE](NOTICE).
