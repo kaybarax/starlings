@@ -19,7 +19,8 @@ def environment(date=None):
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file", "GIT_PROTOCOL_FROM_USER": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
     if date is not None:
         for role in ("AUTHOR", "COMMITTER"):
-            env[f"GIT_{role}_NAME"], env[f"GIT_{role}_EMAIL"] = IDENTITY
+            env[f"GIT_{role}_NAME"] = os.environ.get("STARLINGS_COMMIT_NAME") or IDENTITY[0]
+            env[f"GIT_{role}_EMAIL"] = os.environ.get("STARLINGS_COMMIT_EMAIL") or IDENTITY[1]
             env[f"GIT_{role}_DATE"] = f"{int(date)} +0000"
     return env
 

@@ -542,5 +542,20 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(batches.EXIT, {"ok": 0, "invalid": 2, "conflict": 3, "pending": 4, "parked": 5, "blocked": 5, "stale": 6, "failed": 7})
 
 
+class CommitIdentityTests(unittest.TestCase):
+    def test_identity_defaults_and_environment_override(self):
+        with patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("STARLINGS_COMMIT_NAME", None)
+            env.pop("STARLINGS_COMMIT_EMAIL", None)
+            default = gitops.environment(0)
+            self.assertEqual((default["GIT_AUTHOR_NAME"], default["GIT_COMMITTER_EMAIL"]), gitops.IDENTITY)
+        with patch.dict("os.environ", {"STARLINGS_COMMIT_NAME": "release-owner", "STARLINGS_COMMIT_EMAIL": "owner@example.invalid"}):
+            chosen = gitops.environment(0)
+            for role in ("AUTHOR", "COMMITTER"):
+                self.assertEqual(chosen[f"GIT_{role}_NAME"], "release-owner")
+                self.assertEqual(chosen[f"GIT_{role}_EMAIL"], "owner@example.invalid")
+            self.assertNotIn("GIT_AUTHOR_NAME", gitops.environment())
+
+
 if __name__ == "__main__":
     unittest.main()
