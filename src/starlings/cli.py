@@ -11,7 +11,7 @@ import tempfile
 import threading
 
 from . import __version__
-from . import batches, gitops, promotion, runner, signer, verifier
+from . import batches, demo, examples, gitops, promotion, runner, signer, verifier
 from .gitops import GitError
 from .policy import PRESETS, PolicyError, parse, preset, render
 from .state import layout
@@ -73,6 +73,13 @@ def parser():
     recover.add_argument("batch")
     recover.add_argument("--resolve", help="ambiguous promotion ID to resolve")
     recover.add_argument("--as", dest="outcome", choices=("landed", "not-applied"), help="operator resolution for --resolve")
+    example = commands.add_parser("examples", help="generate deterministic example projects").add_subparsers(dest="action", required=True, parser_class=Parser)
+    example_init = example.add_parser("init", help="write a small pure-Python project with unittest checks and starlings.toml; never overwrites")
+    example_init.add_argument("target", type=Path, help="directory to create; must be absent or empty")
+    example_init.add_argument("--preset", choices=PRESETS, default=PRESETS[0])
+    example_init.add_argument("--with-qualification", action="store_true", help="add the assembly, selection, artifact and exclusive tables used by qualification runs")
+    demo = commands.add_parser("demo", help="run a small end-to-end demo in a disposable directory")
+    demo.add_argument("--directory", required=True, type=Path, help="disposable directory for the demo; created if absent and must be empty if it exists")
     doctor = commands.add_parser("doctor", help="read-only diagnostics; does not certify enforcement")
     doctor.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR); inspected, never created")
     batch = commands.add_parser("batch", help="prepare a batch against a local bare authority").add_subparsers(dest="action", required=True, parser_class=Parser)
@@ -198,7 +205,11 @@ def warnings(policy):
     return result
 
 
-def perform(args):
+def perform(args, json_output=False):
+    if args.command == "examples":
+        return examples.init(args.target, args.preset, args.with_qualification)
+    if args.command == "demo":
+        return demo.run(args.directory, json_output)
     if args.command in ("batch", "task", "lane", "stage", "status", "signer", "plan", "run", "cancel", "check", "approve", "revoke", "promote", "recover") or (args.command == "policy" and args.action == "trust"):
         return batch_command(args)
     root = args.directory.resolve(strict=True)
@@ -254,6 +265,8 @@ def emit(data, json_output, code=0, error=None, status=None):
         print(json.dumps(result, sort_keys=True, ensure_ascii=True))
     elif error:
         print(f"starlings: {error['code']}: {error['message']}", file=sys.stderr)
+    elif isinstance(data, str):
+        print(data)
     elif "toml" in data:
         for warning in data["warnings"]:
             print(warning)
@@ -272,7 +285,7 @@ def main(argv=None):
         return emit({"version": __version__}, True)
     try:
         args = parser().parse_args(argv)
-        result = perform(args)
+        result = perform(args, json_output)
         if isinstance(result, tuple):
             status, data = result
             return emit(data, json_output, batches.EXIT[status], status=status)

@@ -1,169 +1,207 @@
 # Starlings
 
-An offline, stdlib-only Python foundation for configurable verification policies in parallel Git development. Requires Python 3.11 or newer. Distribution, import and command name: `starlings`.
+Choose where your CI runs when many coding agents work on one repository in parallel.
 
-## Scope
+## Status
 
-Milestone 1 ships policy previews, validation, diagnostics and versioned data contracts. Milestone 2 adds local assembly against a local bare authority: batches, atomic task claims with worktrees, reviewed handoffs, single-writer lane assembly in dependency order, reviewed conflict resolutions, lane freezes and target-leased staging. Milestone 3 adds the verifier and runner: trusted policy read from a reviewed authority commit, staging and release planning with affected selection that expands on unknown inputs, budget-admitted local runs (native or a pinned docker guest) with timeouts, cancellation and process-group reaping, artifact capture, Ed25519-signed receipts, receipt checks (invalid, stale, reuse, force-fresh) and extended diagnostics. Milestone 4 integrates promotion and recovery: expiring approvals, a SQLite promotion journal, one atomic `git update-ref --stdin` transaction per landing for the task (lane ref), staging and release gates, and `recover` for journalled promotions, lane include intents and lost runs. The release branch is written only by `promote` with a passed, fully rechecked release receipt; deployment is out of scope. This version does not enforce memory or disk limits for native checks, run hosted executors, support remote authorities, install harness instructions or create hosted workflows. Enforcement is coordinator-only: a direct writer to the authority bypasses it.
+**Under active development, not yet released.** Local milestones 1–5 of 6 are complete; the optional GitHub milestone has not started. Commands, the policy schema and file formats can still change, so do not rely on starlings for real projects yet.
 
-Install a locally built wheel in an isolated environment:
+| Milestone | What it delivers | Status |
+| --- | --- | --- |
+| 1. Contracts and package | Installable wheel, CLI, policy schema and presets | Done |
+| 2. Local assembly | Batches, task worktrees, handoff, lane assembly and freeze | Done |
+| 3. Verifier and runner | Gate planning, check execution, signed receipts, stale-result checks | Done |
+| 4. Promotion and recovery | Guarded landing on staging and release, recovery after an interruption | Done |
+| 5. Local qualification | Four lanes and 32 tasks under every preset, with benchmarks | Done (local) |
+| 6. Optional GitHub operation | Hosted checks on GitHub Actions and pull request publishing | Not started |
 
-```sh
-python3 -m venv /path/outside/checkout/venv
-/path/outside/checkout/venv/bin/python -m pip install /path/to/starlings-0.1.0-py3-none-any.whl
-/path/outside/checkout/venv/bin/starlings --version
+This table is updated as each milestone is completed. Everything below describes the local path: a local bare Git repository as the authority, with checks run on your own machine. The one unfinished milestone is optional and noted where it appears.
+
+## Why starlings
+
+Coding agents make it cheap to run many tasks at once. Each task produces a branch, and if every branch triggers a full CI run, cost and waiting time multiply with every task and every lane of work.
+
+Starlings lets you decide which steps are verified. Work moves from a task, to a lane, to a staging branch, to a release branch. You pick which of those three transitions run checks, and starlings makes sure nothing lands on a gated branch without a passing result for that exact change.
+
+It is built for a solo engineer or small team coordinating several agents, and it works just as well for a person at a terminal.
+
+## How it works
+
+```text
+task worktrees ──► lane branch ──► dev (staging) ──► main (release)
+              task gate      staging gate       release gate
 ```
 
-From an existing project directory:
+Each task gets its own Git worktree. Finished tasks are collected into a lane. Finished lanes are combined onto the staging branch. The staging branch is promoted to the release branch.
+
+A gate is a set of checks that must pass before a transition happens. A policy file in your project says which gates are on. With every gate off except release, a batch of 32 tasks needs one CI run. With every gate on, the same batch needs 37.
+
+## Concepts
+
+| Term | Meaning |
+| --- | --- |
+| Authority | The bare Git repository whose branches are the source of truth. |
+| Batch | One round of parallel work, started from a pinned staging commit. |
+| Lane | A branch that collects related tasks. One writer assembles it. |
+| Task | One unit of work, done in its own worktree and handed off as a reviewed commit. |
+| Candidate | The exact commit a gate plans checks against, bound to its target branch. |
+| Gate | The checks required at a transition: task, staging or release. |
+| Policy | `starlings.toml`, the file that defines gates, checks and limits. |
+| Trusted policy | The policy version you have reviewed and registered. Only it can plan or run checks. |
+| Plan | The exact candidate and the checks that will run against it. |
+| Receipt | A signed record that a plan's checks passed. |
+| Promote | The only command that lands a verified candidate on a gated branch. |
+
+## Install
+
+Starlings needs Python 3.11 or later and has no third-party runtime dependencies. It also needs Git 2.38 or later and OpenSSH `ssh-keygen` with `-Y` signing support. Docker is optional and only used for guest checks.
+
+From a source checkout, `PYTHONPATH=src python3 -m starlings` runs it without installing. To install, build a wheel and put it in a fresh environment outside any checkout:
 
 ```sh
-starlings init
-starlings init --preset release-only --preview --json
-starlings init --preset combined-lanes-release --preview
-starlings init --preset each-lane-release --preview
-starlings init --preset every-task-lane-release --preview
-starlings init --write
-starlings policy show
-starlings policy validate --json
-starlings doctor --json
+uv build --offline --wheel --out-dir <wheel-dir>
+python3 -m venv <venv-dir>
+<venv-dir>/bin/python -m pip install <wheel-dir>/starlings-0.1.0-py3-none-any.whl
+<venv-dir>/bin/starlings --version
 ```
 
-## Local assembly (milestone 2)
+## Quick start
+
+`starlings demo` runs the whole release-only flow end to end in a disposable directory: it generates the example project, seeds a bare authority and drives one lane with two tasks through every step. It works offline, needs no edits and prints a short summary:
 
 ```sh
-export STARLINGS_STATE_DIR=/absolute/private/state
-starlings batch prepare demo --lanes ledger,reports --authority /absolute/authority.git
-starlings task assign demo totals --lane ledger --owner worker-a
-starlings task assign demo summary --lane reports --owner worker-b --after totals
-starlings task handoff demo totals --head <sha> --review <review-ref>
-starlings task handoff demo summary --head <sha> --review <review-ref> --prerequisite totals=<sha>
-starlings lane assemble demo ledger
-starlings lane resolve demo reports --task <task> --head <sha> --review <review-ref>
-starlings lane freeze demo ledger
-starlings stage demo --lanes ledger,reports
-starlings stage demo --lanes reports --resolution <sha> --review <review-ref>
-starlings status demo --json
+starlings demo --directory <dir>
 ```
 
-Every assembly command accepts `--state-dir` (or `STARLINGS_STATE_DIR`), `--directory` and `--json`; lane and stage commands also accept `--owner` and `--lease-seconds` (default 600). The authority must be an absolute path to an existing local bare repository; remote authorities are unsupported. All Git work runs as argv subprocesses (never a shell) with hooks disabled (`core.hooksPath=/dev/null`), `GIT_TERMINAL_PROMPT=0` and only the `file` protocol allowed. Git 2.38 or newer is required for `merge-tree --write-tree`; older versions are diagnosed.
+The directory must be absent or empty; everything the demo writes stays inside it. A complete copy-and-paste version, including a failing variant, is in [docs/qualification.md](docs/qualification.md).
 
-The state directory is created with mode 0700 if absent and validated with the rules below. It holds `starlings.db` (SQLite, WAL, foreign keys, schema-version table, short `BEGIN IMMEDIATE` transactions), `mirrors/<sha256 of authority path>.git` (a bare coordinator mirror used for all object work) and `worktrees/<batch>/<task>`.
-
-- `batch prepare` reads `starlings.toml` from `--directory`, records the SHA-256 of the manifest bytes as an **untrusted** policy digest, snapshots the policy, records lane order and pins the authority staging branch as the batch base (`refs/starlings/<batch>/base` in the mirror). Identical re-runs are idempotent; different authority, lanes or manifest for the same batch is a conflict.
-- `task assign` atomically claims a task (the same owner and arguments are idempotent; another claimant conflicts) and creates a worktree on `starlings/<batch>/<task>` at the base. `--after` names prerequisites that must already be assigned.
-- `task handoff` requires a full commit ID present in the mirror object store and descending from the base, and retains it at `refs/starlings/<batch>/tasks/<task>`. Prerequisite SHAs must match the `--after` declarations and the prerequisites' handed-off heads; otherwise the task is parked with a reason. A parked or not-yet-included task may be handed off again.
-- `lane assemble` takes the lane lease and includes handed-off tasks in assignment order (prerequisites are always assigned earlier) with `git merge-tree --write-tree` and `commit-tree`, advancing `refs/starlings/<batch>/lanes/<lane>` by compare-and-swap. A task parks if a same-lane prerequisite is not included, a cross-lane prerequisite is not yet staged, its diff from the base touches an `[assembly] excluded` glob, its head contains the handed-off head of another task in the batch that is not a declared prerequisite (directly or through the declared prerequisites' own `--after` chains), or it conflicts with the lane tip (conflicting paths are reported). Undeclared content parks with kind `dependency` and names the undeclared tasks; declared prerequisites need not be ancestors. Parked tasks other than handoff parks are retried on the next run.
-- `lane resolve` accepts a resolution commit for a conflict-parked task only with `--review` and only if it contains the current lane tip and the task head; without `--review` the task stays parked. A resolution that adds an excluded path or another task's undeclared head (one not already in the lane tip) is refused and the task stays conflict-parked, so a corrected resolution can follow. The resolution is retained at `refs/starlings/<batch>/resolutions/<lane>/<task>` and becomes the lane tip.
-- `lane freeze` records the tip at `refs/starlings/<batch>/frozen/<lane>`; further assembly or resolution on that lane is refused. The result lists `left_out` tasks (assigned, handed-off or parked, with state and reason) that the frozen tip does not contain; `status` shows the same per frozen lane.
-- `stage` requires frozen lanes and an expiring target lease on the authority staging branch. Mode `each-lane` builds successive candidates in recorded lane order; `combined-ready` builds one candidate whose parents are the observed staging head followed by the lane tips. Each candidate is retained at `refs/starlings/<batch>/candidates/<digest>` and recorded with a `Candidate` and an `Assembly` provenance record. If `[gates.staging].scope` is not `none`, the first candidate is prepared and the command returns pending without advancing staging; it is then planned, run and landed with `promote` (below), after which the next `stage` call continues with the waiting lanes. With scope `none`, objects are fetched into the authority and the staging branch advances with `git update-ref <ref> <new> <old>`; if staging moved after planning, nothing is written and the result is stale. `stage` never writes the release branch. At the start of each call, `stage` reconciles journalled promotions for the staging target and refuses a target parked with `ambiguous-landing`.
-- If a round conflicts with the staging head, `stage` blocks with the conflicting paths. Supply `--resolution <sha> --review <ref>` (both together; `--resolution` alone is blocked as unreviewed, `--review` alone is invalid). The option applies only to a conflicting round; in `each-lane` mode `--lanes` must name exactly one not-yet-staged lane. The resolution must be in the mirror and contain every round lane's frozen tip (otherwise invalid) and the current staging head (otherwise stale: staging moved since it was made). Paths it changes beyond the lanes' own changes that match an excluded glob, and undeclared task heads not already in staging or the lane tips, block with no write. The candidate keeps the `Candidate` shape: the resolution's tree with parents `(staging head, *lane tips)`. The resolution is retained at `refs/starlings/<batch>/resolutions/@stage/<candidate digest>` and recorded in the `Assembly` resolutions as `("@stage", "<comma-joined lanes>", head, review)`; `status` lists `stage_resolutions`.
-- Lost acknowledgements: a candidate is journalled as `prepared` before the authority write. At the start of each round, if a `prepared` candidate for exactly those lanes is already contained in the staging head, `stage` reconciles it (marks the candidate, lanes and tasks staged; entry `reconciled: true`) without writing. If a round lane's frozen tip is already in the staging head with no recorded landing, `stage` refuses with status `blocked`, code `already-landed`, and writes nothing.
-- `status` lists tasks (assigned, handed-off, included, parked with reason, staged), heads, reviews, lane tips, frozen state, resolutions, candidates with provenance, current authority heads and, for every handed-off task, its retained ref and whether it still matches.
-
-Leases store absolute expiry. An expired lease can be taken over; the previous owner's later write, finalize or release is refused. Commit timestamps and identity for commits created by Starlings are fixed per batch, so rebuilding the same inputs yields the same candidate.
-
-Limitations: one coordinator machine; lane-ref/journal divergence that no include intent explains is reported as stale (`lane-diverged`) rather than reconciled; ungated staging recovery covers only the lost-acknowledgement and externally-landed cases above; excluded globs use `fnmatch` semantics where `*` also matches `/`; lane resolutions are checked against them only for their diff from the lane tip; undeclared-content detection sees only handed-off heads (not unrecorded commits); task worktrees are not cleaned up; assembly leases do not supervise processes. Anyone with direct write access to the authority can bypass these checks.
-
-Every subcommand accepts `--directory PATH`. Initialization defaults to preview, is offline, launches no subprocesses, and only `--write` writes `starlings.toml`. It stages a complete UTF-8 file in the same directory, flushes it, then publishes by exclusive hard link. Existing files, directories and even dangling symlinks are never replaced. A crash can leave a `.starlings-*` temporary file; inspect before manual cleanup. No crash-durable directory journal is claimed. No instruction or workflow files are touched.
-
-The generated check is a **synthetic, deliberately failing example**, not project coverage. Replace it with reviewed project commands. Presets select task, staging and release scopes; they do not claim four real check families or expected execution counts. Release-only staging may contain defects. `policy validate` validates structure, not command safety, command availability, meaningful test coverage, policy trust or successful execution.
-
-## Verification and runs (milestone 3)
+The same steps by hand look like this. Set up once:
 
 ```sh
-export STARLINGS_STATE_DIR=/absolute/private/state
-starlings policy trust --authority /absolute/authority.git --commit <sha> --review <review-ref>
-starlings policy trust --authority /absolute/authority.git --commit <sha> --review <review-ref> --supersedes <current digest>
+starlings examples init <project-dir> --preset release-only
+# commit the project, create a bare repository, and push dev and main to it
+cd <project-dir>
+
+export STARLINGS_STATE_DIR=<private-state-dir>
+starlings policy trust --authority <authority-path> --commit <policy-sha> --review <review-ref>
 starlings signer init
-starlings plan demo --gate staging [--candidate <candidate-id>]
+starlings doctor
+```
+
+Then run a batch:
+
+```sh
+starlings batch prepare demo --lanes work --authority <authority-path>
+starlings task assign demo feat-a --lane work --owner you
+# make and commit a change in the worktree that was returned
+
+starlings task handoff demo feat-a --head <task-sha> --review <review-ref>
+starlings lane assemble demo work
+starlings lane freeze demo work
+starlings stage demo --lanes work
+
 starlings plan demo --gate release
-starlings run <plan-id> [--force-fresh] [--timeout <seconds>] [--owner <label>]
-starlings cancel <run-id>
-starlings check <receipt-id> [--target <branch-or-ref>]
-starlings doctor --json
-```
-
-These commands accept `--state-dir` (or `STARLINGS_STATE_DIR`), `--directory` and `--json`.
-
-- `policy trust` reads `starlings.toml` from the named commit **in the authority** (never the working directory), validates it, stores the exact bytes as `policy/<sha256>.toml` (0600) and records authority, digest, commit, review, previous digest and time. The first trust for an authority takes `--review` only; every later trust must name the current digest with `--supersedes` (otherwise `trust-conflict`, status conflict). Re-trusting the current digest is idempotent. `trusted_at` uses the store clock. The trust record is the operator's statement that the policy was reviewed; Starlings does not inspect the review.
-- `signer init` runs the system `ssh-keygen -t ed25519 -N "" -C starlings-verifier` to create `signer-references/verifier` (0600) and `verifier.pub`, and writes `signer-references/allowed_signers` with the principal `starlings-verifier` restricted to namespace `starlings-receipt`. It is idempotent and never overwrites an existing or inconsistent key or allowed_signers file. **The private key is unencrypted at rest**; its only protection is the operator-owned 0700 state directory. A missing `ssh-keygen` is diagnosed. Receipts are signed and verified with `ssh-keygen -Y sign/verify -n starlings-receipt`.
-- `plan` uses only the current trusted policy for the batch's authority. If no policy is trusted, or the batch's recorded manifest digest differs from it, planning is blocked with `untrusted-policy`. `--gate staging` plans a `pending` staging candidate (the latest one by default). `--gate release` fetches the current authority staging and release heads, builds the release candidate with `git merge-tree` as a commit with parents `(release head, staging head)`, and retains it only at `refs/starlings/<batch>/candidates/<digest>` in the coordinator mirror; the authority's release branch is never written. A release conflict blocks with `release-conflict` and the paths (resolve on staging, review, freeze again); a release head that already contains staging blocks with `nothing-to-release`. `--gate task` plans a `pending` task candidate (the latest one by default, or `--candidate`); its target is the lane ref and its changed paths run from the lane tip to the include commit. Non-local executors are blocked `unsupported` and disabled gates `gate-disabled`.
-- Selection: scope `full` selects every gate check (`selection: full`). Scope `affected` maps the candidate's changed paths (base to commit) through `[selection]` globs and selects the gate checks whose globs match (`affected`). If any changed path matches no glob of the gate's checks, any gate check has no `[selection]` entry, or nothing is selected, the plan expands to the gate's full check list (`expanded`) and lists `unmapped_paths` and `unmapped_checks`. Globs use `fnmatch` semantics (`*` also matches `/`). The plan ID is deterministic: identical inputs (candidate, trusted policy digest, gate, changed paths, selected argv, globs, artifacts, exclusives, limits, guest image) return the same plan with `repeated: true`.
-- `run` refuses a plan whose policy is no longer trusted (`stale-plan`) and requires a signer (`no-signer`). It takes a per-plan run lease, so a concurrent run of the same plan is blocked (`lease-held`). Unless `--force-fresh` is given, a stored passed receipt for the same plan that passes a full `check` is reused (`reused: true`). Checks run sequentially in plan order. Before each check, admission atomically acquires, in one SQLite transaction, one of `limits.cpu_slots` CPU slot leases, one of `limits.max_guests` guest slot leases for guest checks, and every `[exclusive]` resource of the check; if any is unavailable the run **waits** (polling, still cancellable) rather than failing. The budget is host-wide for the state directory, sized by the plan's trusted limits. Leases are released only after the check's process group is confirmed empty.
-- Each check gets a fresh detached worktree of the candidate commit under `worktrees/runs/<run>/<check>` (removed afterwards), a private job directory from the system temporary directory used as `HOME` and `TMPDIR` (removed afterwards), and an environment reduced to `PATH`, `LANG`, `LC_ALL`, `HOME` and `TMPDIR` (no `GIT_*`, no state or signer paths). It starts in a new session with stdin closed and stdout/stderr streamed to `logs/<run>/<check>.out` and `.err` (0600). The timeout is `limits.timeout_seconds`; `--timeout` may only lower it. On timeout, `cancel`, or SIGINT/SIGTERM to the runner, the process group gets SIGTERM, a grace period (2 s), SIGKILL, then the leader is reaped and `os.killpg(pgid, 0)` is polled until the group is gone. Stray group members left after a normal exit are reaped the same way. A group that cannot be confirmed empty leaves its slot leases to expire and the run fails `unreaped` without a receipt.
-- Required `[artifacts]` files (regular files, no symlinked path components) are copied to `artifacts/<run>/<check>/<path>`; a missing one fails that check (`missing-artifact`). Logs and artifacts are hashed with SHA-256. Each check stores an `Evidence` record whose artifact digest covers its file manifest. When every planned check completed (passed, failed, timed out or missing an artifact), a `Receipt` is signed, stored in the database and written to `evidence/<run>/receipt.json` with `receipt.json.sig`; the outcome is `passed` only if every check exited 0 with all artifacts present. **A timeout counts as a completed failure and yields a signed failed receipt.** Cancelled or interrupted runs (and guest-unavailable runs) never sign; their evidence is retained. Failed evidence is never deleted. Run exit status: 0 passed (or reused), 7 failed outcome, cancelled, interrupted, unreaped or guest-unavailable.
-- Resources: `memory_mib` and `disk_mib` are recorded per check, not enforced for native checks. Each evidence row reports the process-wide `ru_maxrss` high-water mark of reaped children (bytes; it covers all children the runner has waited for, not just this check, and misses grandchildren not waited for by their parent) and the checkout's on-disk size after the check. Guest checks get `--memory` of `memory_mib / max_guests` and `--cpus 1`.
-- Guest environment: `docker run --rm --pull never --network none --cpus 1 --memory <m>m --mount type=bind,source=<checkout>,target=/work -w /work --name starlings-<run>-<check> <image> <argv>`. The docker CLI receives the operator environment minus `GIT_*` and `STARLINGS_*`; the container receives none of it. Before a guest run, `docker info` must succeed and the pinned `[guest] image` must be present locally; otherwise the run fails `guest-unavailable` with no fallback to native. The checkout must be on a path shared with the docker VM (for Colima, the home directory by default); a bind source the daemon cannot see fails the check with `guest-unavailable` instead of mounting an empty directory. Timeout or cancellation runs `docker kill` and polls `docker ps -a` until the container is gone, then reaps the client's process group.
-- `check` returns `valid` (exit 0), `invalid` (exit 2), `stale` (exit 6) or `failed` (exit 7, a correctly signed receipt that records a failed outcome), with reasons and `authorizes: true` only when valid. Invalid: the record does not match its ID, plan or candidate; the signature does not verify against `allowed_signers`; any retained log or artifact is missing or its SHA-256 differs; evidence IDs do not match the retained evidence for every planned check; or the receipt target differs from `--target` (default: the plan's target). Stale: the policy digest is no longer the authority's trusted policy, the verifier fingerprint is not the current signer, or the target no longer equals the candidate base (staging moved for a staging receipt; release moved for a release receipt; the mirror lane ref moved for a task receipt). Invalid takes precedence over failed, and failed over stale: a failed receipt keeps reporting `failed` after its target moves, with the stale reasons listed.
-- `cancel` sets a flag that the runner polls between and during checks; it reports the run's state if it is not running.
-- `doctor` additionally reports the Git version check, `ssh-keygen` location, whether a signer exists in the state directory, docker daemon reachability and Colima status. It runs only read-only probes (`git --version`, `docker info`, `colima status`) and never starts anything.
-
-Same-login trust: native checks run as the operator's user. They cannot see the signer path or state directory in their environment, but their working directory is inside the state directory, a worktree's `.git` file points into the coordinator mirror, and nothing prevents a hostile check from reading the unencrypted key or altering state. A descendant that calls `setsid` (or `setpgid`) leaves the process group and escapes tracking on macOS. Use native execution only for trusted contributors. The docker guest isolates the network and filesystem view but is not certified as a security boundary.
-
-### Supported profiles
-
-| Profile | Status |
-|---|---|
-| Native, macOS 27.2.1 (arm64), Python 3.14.4, Git 2.54.0 | Passes the full suite. |
-| Guest: Colima 0.10.1 (vz, virtiofs, Ubuntu 24.04.4 aarch64), docker client 29.4.3 / server 29.2.1, image `python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e` (official `python:3.13-alpine` index, arm64, Python 3.13.18) | Parity passed: the same passing and failing journey check gives the same outcome, exit code and artifact digest natively and in the guest (`GuestParityTests`). |
-| Any other docker host or image | Not qualified. Unit tests cover the adapter with a fake docker binary. |
-
-The real parity test runs only when `STARLINGS_TEST_GUEST_IMAGE` names a locally present image and `STARLINGS_TEST_GUEST_ROOT` names a directory shared with the docker VM; otherwise it is skipped with that reason.
-
-## Policy schema 1
-
-`starlings init --preview` is the complete schema example. All fields in that output are required except disabled gates may omit `executor`, `environment` and `checks`. Unknown fields are errors at every table. The optional `[assembly]` table accepts `excluded`, a duplicate-free array of relative path globs; tasks whose changes touch a matching path park during assembly. Optional tables keyed by existing check IDs (unknown IDs are errors), each value a nonempty duplicate-free array: `[selection]` relative path globs whose changes select the check under scope `affected`; `[artifacts]` normalized relative file paths (no `.`/`..`, no glob characters) the check must produce; `[exclusive]` resource names (`[a-z0-9][a-z0-9._-]*`, for example `port-5432`) the check holds exclusively. `[guest]` has exactly `image`, pinned as `name@sha256:<64 lowercase hex>`, and is required when any enabled gate uses environment `guest`. Presets omit these tables. `project` is a nonempty name; `staging` and `release` are distinct Git branch names. `fully_verified_release = true` requires release scope `full`.
-
-The gates are `task`, `staging`, `release`. Scopes: `none`, `affected`, `full`. Staging mode: `each-lane` or `combined-ready`. Enabled gates require a nonempty, duplicate-free list of existing check IDs plus executor (`local`, `github`) and environment (`native`, `guest`). Disabled gates remain fully structurally validated. Checks are nonempty argv arrays, never shell strings; empty non-executable arguments are allowed. Check IDs use lowercase letters, digits, hyphens and underscores, starting with a letter. Commands are never evaluated by this milestone. There is no check-dependency graph in schema 1; gate-to-check references are the only execution dependencies.
-
-Positive integer limits: `cpu_slots` (up to 1024), `memory_mib` (up to 2^30), `disk_mib` (up to 2^40), `timeout_seconds` (up to 604800). `max_guests` is an integer 0–1024; enabled guest gates require at least 1. Booleans are not integers. `cpu_slots`, `max_guests` and `timeout_seconds` are enforced by the runner; `memory_mib` and `disk_mib` are recorded (and bound guest memory) but not enforced for native checks. Executor `github` is accepted vocabulary but unsupported for planning.
-
-`authority.mode` currently accepts only `local-bare`. The first authority design is a local bare Git repository with frozen source refs and expected-target updates in one ref transaction, under exclusive coordinator control. The authority path is supplied per batch to `batch prepare`; `doctor` does not register or inspect it. A direct Git writer can bypass a CLI; future enforcement requires actual exclusive credentials or equivalent server controls. Remote authorities and GitHub enforcement remain unsupported.
-
-## Private state and contracts
-
-`doctor --state-dir /absolute/private/path` describes, validates and never creates state. Default: `~/.local/state/starlings`. State must be separate from the checkout (neither ancestor nor descendant), with no symlink components. An existing root and known entries must be operator-owned and inaccessible to group/other; directories need mode 0700 or stricter and files 0600 or stricter. Known children: `starlings.db` (with its `-wal` and `-shm` files), `mirrors/` and `worktrees/` (created by assembly commands), `policy/` (trusted policy blobs), `signer-references/` (signer key, public key, allowed_signers), `logs/`, `artifacts/` and `evidence/` (per-run retained files and receipts), all created on demand with mode 0700 directories and 0600 files, plus the reserved `journal.sqlite3`. These checks are not a race-proof file-opening authority or sandbox. The database schema is version 3: version 1 and 2 databases are upgraded in place in one transaction by adding the verifier and promotion tables and rebuilding `tasks` to allow state `pending` (foreign keys are checked before commit).
-
-`starlings.contracts` supplies frozen `Candidate`, `Plan`, `Evidence`, `Receipt`, `Adapter`, `Assembly`, `Approval` and `Promotion` records. Schema is integer 1, except `Plan`, which is schema 2. IDs are `<kind>:<sha256>` over ASCII canonical JSON (sorted keys, compact separators, escaped Unicode) containing schema, kind and all typed fields, excluding ID. Tuple order is identity-significant. IDs are content identities, **not signatures**. Candidate binds repository/authority labels, target, base, ordered parents, tree and exact commit; plan binds candidate ID, trusted policy digest, gate, selected checks, execution location, selection (`full`, `affected`, `expanded`) and an inputs digest; evidence records one check outcome and artifact digest; adapter describes name, version and capabilities; assembly binds a candidate ID to the batch, ordered lanes, ordered entries `(task, lane, head, review, ((prerequisite, head), ...))` and resolutions `(lane, task, head, review)`. approval binds plan ID, candidate ID, `by`, review (or null), `granted_at` and `expires_at`; promotion binds plan ID, receipt ID, ordered approval IDs, target, old and new commit, tree, ordered parents and `landed_at`. Candidate and receipt targets are a fully qualified branch ref or a task-gate lane ref `refs/starlings/<batch>/lanes/<lane>` (existing IDs are unchanged). receipt binds candidate ID, plan ID, target, base, commit, tree, policy digest, outcome (`passed`, `failed`), ordered evidence IDs, ordered `(retained path, sha256)` artifact and log digests, verifier (`version`, signer `fingerprint`), executor, environment, toolchain (`python`, `git`, `platform`, `guest_image` or null) and `issued_at`. The signed payload is the receipt's canonical JSON (including its ID); the SSH signature is stored beside it and is not part of the ID. `Receipt.from_dict` rebuilds and re-identifies a stored receipt. Approvals are separate records checked live at promotion, not part of the signed receipt. Never treat constructing a record as proof that it happened; only `check` evaluates a receipt.
-
-## Output and development
-
-`--json` works before or after subcommands. JSON responses use `schema`, `ok`, and either `data` or `error` (`code`, `message`). Assembly commands also include `status` (`ok`, `pending`, `parked`, `blocked`, `stale`, `failed`); errors may carry `error.data`. Exit statuses: 0 ok; 2 usage, invalid input or invalid policy/state configuration (including unsupported Git); 3 filesystem/missing-file/conflict errors, including a conflicting re-prepare or a task claimed by another owner; 4 pending (staging or task candidate prepared, target not advanced); 5 parked or blocked (tasks parked, lease held, lane frozen or not frozen, staging conflict, unreviewed or excluded or undeclared staging resolution, already landed, untrusted policy, release conflict, nothing to release, unsupported gate, missing signer, missing approvals, ambiguous landing, refused operator resolution, recovery that skipped a held lease or left a target parked); 6 stale (compare-and-swap or ref-transaction failure, moved target or source, lost lease, stale plan or stale receipt; nothing further written); 7 failed (Git or database failure, failed run or receipt outcome including a promotion refused for a failed receipt, cancelled, interrupted, unreaped or guest-unavailable run). `check` reports invalid receipts with exit 2 and status `invalid`. Unsupported later commands fail with status 2, never fake success. Human help/version use standard argparse formatting; `--version --json` returns the JSON envelope. `doctor` is read-only inventory, not a readiness certificate; a missing manifest is informational.
-
-```sh
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-uv build --offline --wheel --out-dir /path/outside/checkout/wheels
-```
-
-Runtime has no third-party dependencies. The isolated build uses pinned Hatchling 1.33.0. Build dependencies must already be cached for offline builds. Current tests demonstrate Python 3.14 on macOS; other Python/platform combinations are not qualified. Runtime external tools: Git 2.38+, OpenSSH `ssh-keygen` with `-Y` support for signing, and optionally docker for guest checks.
-
-Milestone 3 limitations: checks within a run execute sequentially (admission bounds concurrency across runs); memory and disk are measured, not enforced, for native checks; a descendant that escapes its process group is not tracked; the signer key is unencrypted.
-
-## Promotion and recovery (milestone 4)
-
-```sh
-starlings approve <plan-id> --by <identity> --expires-in <seconds> [--review <review-ref>]
-starlings revoke <approval-id>
+starlings run <plan-id>
+starlings check <receipt-id>
 starlings promote <plan-id> --receipt <receipt-id>
-starlings recover <batch>
-starlings recover <batch> --resolve <promotion-id> --as landed|not-applied
 ```
 
-These commands accept `--state-dir` (or `STARLINGS_STATE_DIR`), `--directory` and `--json`; `revoke`, `promote`, `recover` and `policy trust` also accept `--owner` and `--lease-seconds` (default 600).
+The authority path must be an absolute path to an existing local bare repository. The example project ships real `unittest` checks. A manifest created with `starlings init` contains a placeholder check that fails on purpose, so replace it with your project's own commands before use.
 
-- Approvals: each `[gates.*]` table accepts an optional integer `approvals` (0–16, default 0; booleans rejected); presets do not set it. `approve` records an `Approval` for a plan with an expiry of 60 to 2592000 seconds from the store clock. An identity holds at most one live approval per plan: repeating it with the same review returns the existing record (`repeated: true`), a different review conflicts (`approval-exists`); after expiry or revocation a new one may be granted. `revoke` takes the plan's target lease, so it serializes with promotion; if a promotion holds the lease it is blocked (`lease-held`) and the caller retries.
-- `policy trust` now takes the target leases of every target of that authority (staging and release of the new policy, the current trusted policy and every batch on the authority, plus the lane leases of task-gated batches) before recording, and is blocked with `lease-held` while any is held.
-- `promote` takes the target lease (the same `target:<authority>:<ref>` resource as `stage`; the lane lease `lane:<batch>/<lane>` for the task gate), reconciles that target's journal (below) and refuses a parked target (`ambiguous-landing`). It then rechecks everything under the lease: the receipt must belong to the plan and `check` as valid (signature, retained files, trusted policy digest, signer, target, base equal to the current target head); a failed receipt is refused with `receipt-failed` (exit 7), an invalid one with `invalid-receipt`, a stale one with `stale-receipt`. The plan's gate must have its required number of live (unexpired by the store clock, unrevoked) approvals (`approval-required`). Sources must be unchanged (`stale-source`): staging — every candidate lane still has the same frozen tip and is not yet staged, and the candidate is still pending; release — the authority staging head still equals the candidate's staging parent; task — the mirror lane ref and journal tip equal the candidate base, the task is pending with the same reviewed head and its retained task ref is unchanged.
-- The promotion is journalled first: one transaction re-checks the lease, live approvals and trusted digest and inserts a `promotions` row in state `intent` with the receipt, approval IDs, authority, repository, target, old and new commit, tree, parents and sources. Hook `before-write` follows; candidate objects are fetched into the authority without creating refs (not needed for task targets, which live in the mirror); then one `git update-ref --stdin` transaction runs `start`, a `verify` for each source ref in the same repository (release: `refs/heads/<staging>` at the staging parent; task: the retained task ref at the reviewed head), `update <target> <new> <old>`, `prepare` and `commit`. A refused transaction marks the promotion `not-applied` (a staging candidate becomes `stale`) and returns stale with nothing written. After hook `after-write`, the landed ref, tree and parents are verified against the candidate; the promotion becomes `landed` with a `Promotion` record, and the state is finalized: staging marks the candidate, lanes and tasks staged; release records the landing in the promotion; task includes the task (state `included`, lane tip advanced, resolution recorded if any). A promote of a (plan, receipt) that already landed returns `repeated: true` without a lease. Concurrent promotes serialize on the lease: one lands, the other is blocked and later repeated; a different candidate for the same target after a landing is stale.
-- `refs/heads/<release>` in the authority is written only by `promote` with a release receipt. **Deployment is out of scope**: a release landing records an exact commit and authorizes nothing else.
-- Task gate (`[gates.task].scope` not `none`, as in `every-task-lane-release`): `lane assemble` builds the include commit for the next eligible task, retains it as a task candidate (`Candidate` targeting the lane ref, `Assembly` with that one task) in `task_candidates`, sets the task to `pending`, stops assembling the lane and returns pending (exit 4). Repeating `assemble` while the candidate's base is still the lane tip returns the same candidate (`repeated: true`); if the tip moved the candidate becomes `stale` and the task is re-evaluated. `lane resolve` under the task gate likewise records the reviewed resolution as a pending task candidate instead of including it. After `plan --gate task`, `run` and `promote`, the lane ref advances and the next `assemble` continues. A pending task's handoff cannot change.
-- Recovery: `recover <batch>` takes each relevant lease in turn (staging and release targets, every lane, and the run lease of every `running` run) and reports every action. The same target reconciliation runs automatically at the start of `promote` and `stage` for that target, and lane reconciliation at the start of `lane assemble`, `lane resolve` and `lane freeze`. A promotion in `intent` is resolved from the actual target ref: equal to `new` — finished as landed (`recovered: true`); equal to `old` — `not-applied` (retry allowed); anything else — `ambiguous`, which parks the target: `promote` and `stage` on it refuse with `ambiguous-landing`, and `recover` returns blocked, until the operator runs `recover <batch> --resolve <promotion-id> --as landed|not-applied`. `landed` is accepted only if the observed ref is or contains `new` (and `new` has the candidate's tree and parents); `not-applied` only if the observed ref does not contain `new`. A finalize that finds its promotion already reconciled by another coordinator is refused (`lease-lost`) and writes nothing.
-- Include intents: before advancing a lane ref, `assemble` and `resolve` journal `(lane, task, old, new)` (hooks `include-before-write`, `include-after-write`). On the next lane command the intent is finished (lane ref equals `new`), dropped (equals `old`) or left in place with the lane stale `lane-diverged`, whose message names the intent.
-- Lost runs: a `running` run whose run lease has expired (by the store clock) is marked `interrupted`; the process groups recorded at process start are killed with SIGKILL and confirmed empty, guest containers named for the run are stopped, its slot leases are released, its job directories removed and its run worktrees removed with `git worktree remove --force` and `git worktree prune`. Recovery never signs; a run whose lease is still live is skipped.
-- `status` also lists task candidates, promotions (state, observed ref, operator resolution, record), approvals (with `live`) and include intents.
+## Presets
 
-Milestone 4 limitations: one coordinator machine and a local bare authority; enforcement is coordinator-only, and anyone with direct write access to the authority bypasses every check; staging promotions verify lane sources from the journal and the mirror, since frozen refs are not in the authority; recovery kills recorded process groups by ID and cannot prove the group was not reused after a very long outage, and a crash between process start and recording leaves that group untracked; a stalled old coordinator whose lease expired can still race one ref write, which the compare-and-swap old value bounds but whose journal row may then read `not-applied` while another row records the single landing; trust leases do not cover task-gated lanes of batches created later; `landed_at` is the store-clock time of finalization, which for a recovered landing is the time of recovery.
+`starlings init --preset <name> --preview` shows a complete `starlings.toml`. Add `--write` to create it; an existing file is never replaced. `starlings examples init --preset <name>` generates a working example project for the same preset.
+
+| Preset | Task gate | Staging gate | Release gate | Choose it when |
+| --- | --- | --- | --- | --- |
+| `release-only` | off | off | full | You want the fewest runs and accept that staging can be broken until release. |
+| `combined-lanes-release` | off | full, all ready lanes together | full | You want one early signal that the lanes work together. |
+| `each-lane-release` | off | full, one per lane | full | You want to know which lane broke staging. |
+| `every-task-lane-release` | full | full, one per lane | full | You have machine capacity to spare and want the earliest feedback. |
+
+## Using starlings with coding agents
+
+Agents use the same commands as a person. Add `--json` to any command for a structured result with stable identifiers, and rely on the exit status to tell success from pending, blocked, stale or failed work.
+
+A typical split of roles:
+
+- A **coordinator** prepares the batch, assigns each task to a worker with the repository, batch, lane, task, worktree and policy revision, then assembles and freezes lanes, stages and promotes.
+- A **worker** receives a worktree from `task assign`, commits its change there, and reports the exact commit for `task handoff`; it never plans, runs or promotes.
+
+Starlings enforces its rules only on work that goes through the coordinator. Anyone, or any agent, with direct write access to the authority can bypass every check. Until stronger enforcement lands, tell your agents in your project's instruction files to use starlings for every merge and never to write to lane, staging or release branches directly.
+
+**Planned:** ready-made instruction templates for specific agent tools, and hosted execution on GitHub Actions.
+
+## Commands
+
+| Group | Commands | Purpose |
+| --- | --- | --- |
+| Setup and policy | `init`, `policy show`, `policy validate`, `policy trust`, `signer init`, `examples init`, `demo`, `doctor` | Create project files, register the policy, manage the signer, run the demo and diagnose the setup. |
+| Batch, tasks and lanes | `batch prepare`, `task assign`, `task handoff`, `lane assemble`, `lane resolve`, `lane freeze`, `stage`, `status` | Move work from task worktrees into lanes and onto staging. |
+| Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks, and validate the receipt. |
+| Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate, and reconcile after an interruption. |
+
+Exit statuses are stable and documented in [docs/policy.md](docs/policy.md). Full options and semantics are in [docs/operations.md](docs/operations.md).
+
+## Policy
+
+`starlings.toml` lives in your project and is reviewed like code. A minimal release-only policy looks like this:
+
+```toml
+schema = 1
+project = "sample-ledger"
+staging = "dev"                # staging branch
+release = "main"               # release branch; only promote advances it
+fully_verified_release = true  # requires release scope "full"
+
+[authority]
+mode = "local-bare"            # the only supported authority
+
+[gates.task]
+scope = "none"                 # none | affected | full
+
+[gates.staging]
+mode = "each-lane"             # each-lane | combined-ready
+scope = "none"
+
+[gates.release]
+scope = "full"
+executor = "local"
+environment = "native"         # or "guest" with a pinned [guest] image
+checks = ["unit", "service"]
+
+[checks]                       # check ID -> argv array, never a shell string
+unit    = ["python3", "-m", "unittest", "tests.test_unit"]
+service = ["python3", "-m", "unittest", "tests.test_service"]
+
+[limits]
+cpu_slots = 4
+memory_mib = 8192
+disk_mib = 20480
+max_guests = 0
+timeout_seconds = 1800
+```
+
+Checks are argument lists, never shell strings. Validation checks the structure of the file only. It does not run your commands or judge whether they give enough coverage. Use `starlings init --preview` for the authoritative rendered example, and see [docs/policy.md](docs/policy.md) for the full schema.
+
+## State and trust
+
+Starlings keeps its database, worktrees, logs, trusted policies, receipts and signing key in a private state directory, separate from your checkout. Set it with `--state-dir` or `STARLINGS_STATE_DIR`; `doctor` inspects the default `~/.local/state/starlings` without creating it.
+
+Three things carry trust: the policy version you registered with `policy trust`, the signing key created by `signer init`, and the receipts that key signs. `check` and `promote` verify all of them again before anything lands.
+
+The signing key is stored unencrypted and is protected only by the state directory's permissions.
+
+## Limitations
+
+- **Local only.** The authority must be a local bare repository; remote authorities, hosted execution and deployment are unsupported, and the `github` executor is accepted policy vocabulary but is not implemented.
+- **Coordinator-only enforcement.** Anyone with direct write access to the authority bypasses every check.
+- **One coordinator machine.** Checks within a run execute one after another; task worktrees are not cleaned up automatically; assembly leases do not supervise processes.
+- **Native checks are trusted.** They run as you and can read the state directory, including the signing key. `memory_mib` and `disk_mib` are recorded, not enforced, and a descendant that calls `setsid`/`setpgid` escapes process-group tracking. Use native execution only for contributors you trust.
+- **Guest checks are not a security boundary.** They run in a pinned Docker container (`--network none`, `name@sha256:` image), qualified on one recorded Colima profile; other docker hosts and images are unqualified.
+- **Recovery has gaps.** Lane-ref/journal divergence that no include intent explains is reported as stale rather than reconciled, and ungated staging recovery covers only the lost-acknowledgement and externally-landed cases.
+- **Validation is structural.** `policy validate` checks the file's shape, not command safety, availability or coverage. Qualification covers local execution on the recorded profile only; results are honest local measurements with no asserted thresholds — see [docs/qualification.md](docs/qualification.md).
 
 ## License
 
-Starlings is licensed under the Apache License 2.0; see `LICENSE`. Attribution to Kevin Barasa must be retained as described in `NOTICE`.
+Starlings is licensed under the Apache License 2.0. See `LICENSE`. Attribution must be retained as described in `NOTICE`.
