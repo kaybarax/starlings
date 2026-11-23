@@ -2,6 +2,8 @@
 
 Choose when and where CI runs for a software engineering agent swarm.
 
+![A murmuration of starlings at sunset above a skyline blending New York, London, and Berlin.](docs/images/starlings-skyline.png)
+
 Starlings facilitates running CI locally for a swarm of software engineering agents, instead of on paid hosted CI services such as GitHub Actions and the like. It is not a CI system itself. It is a workflow for CI runs and integration checks across many worktrees. As the swarm's work moves from task worktrees into lanes, onto a staging branch and finally onto a release branch, you decide at which of those steps your checks run, and Starlings schedules them on your machine within the CPU, memory and time it has. Nothing lands on a gated branch without a signed, passing result for that exact commit.
 
 Version 0.1.0 is the first release, and it covers the complete local workflow. Coordinating gates on hosted CI (GitHub Actions) is included as an experimental option that has not been tested end to end yet. See [Hosted checks on GitHub](#hosted-checks-on-github-experimental).
