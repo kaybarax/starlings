@@ -2,7 +2,6 @@ import contextlib
 import hashlib
 import io
 import json
-from pathlib import Path
 import stat
 import subprocess
 import unittest
@@ -12,9 +11,6 @@ from test_promotion import PromotionCase, gated_policy
 from fixtures import environment
 from starlings import batches, enforcement, runner, verifier
 from starlings.cli import main
-
-FIXTURE_PARENT = Path("/private/tmp/starlings-h1-tests")
-FIXTURE_PARENT.mkdir(exist_ok=True)
 
 FAST = {"unit": ["python3", "-c", "import sys; sys.exit(0)"]}
 
@@ -31,9 +27,6 @@ def cli(*args):
 
 
 class EnforcementCase(PromotionCase):
-    def make(self, policy, **kwargs):
-        return super().make(policy, parent=str(FIXTURE_PARENT), **kwargs)
-
     def protect(self, f):
         return tv.ok(self, tv.call(f, enforcement.protect, str(f.authority)))
 

@@ -23,7 +23,7 @@ The fake adapter (``adapters.fake_github``) is the qualified offline
 implementation. The real adapter (``adapters.github``) submits real
 workflow dispatches through the ``gh`` CLI; it is implemented but
 unqualified — no passing hosted gate has been recorded, so real event
-delivery, protections, billing and runner parity remain unproven.
+delivery, protections and runner parity remain unproven.
 """
 
 import json

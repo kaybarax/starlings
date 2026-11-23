@@ -63,7 +63,7 @@ starlings demo --directory <empty-dir>
 |---|---|
 | Native: macOS (arm64), Python 3.14, Git ≥2.38 | Full suite and all four presets qualified; the recorded profile is in [qualification.md](qualification.md). |
 | Guest: Colima VM (vz, virtiofs), pinned `name@sha256:` image | Parity passed on one recorded profile; other docker hosts and images are unqualified. |
-| Hosted: `adapter = "github"` via `gh` | Implemented, unqualified — dispatch, routing, binding and dispositions rehearsed; a passing hosted gate was blocked by the account's billing state. |
+| Hosted: `adapter = "github"` via `gh` | Implemented, unqualified — dispatch, routing, binding and dispositions rehearsed; a passing hosted gate could not be exercised during rehearsal. |
 | Other platforms, Pythons and docker setups | Not qualified. |
 
 ## Reproducing the fixtures

@@ -19,12 +19,11 @@ CHECKS = {"journeys": ["python3", "tests/journeys.py"]}
 RENAMED = {"calc.py": "def total(xs):\n    return sum(xs)\n", "report.py": "from calc import total\nprint(total([1]))\n"}
 SUMMARY = {"summary.py": "from calc import compute_total\nprint(compute_total([2]))\n"}
 BROKEN_REPORT = {"report.py": "from calc import missing_name\nprint(missing_name([1]))\n"}
-FIXTURE_ROOT = Path("/private/tmp/starlings-h2-tests")
 
 
 class DiagnoseCase(tp.PromotionCase):
     def semantic(self):
-        fixture = self.make(tp.gated_policy(checks=CHECKS), files=SEMANTIC, parent=str(FIXTURE_ROOT))
+        fixture = self.make(tp.gated_policy(checks=CHECKS), files=SEMANTIC)
         self.ready(fixture)
         return fixture
 
@@ -65,10 +64,6 @@ class DiagnoseCase(tp.PromotionCase):
 
 
 class AcceptanceTests(DiagnoseCase):
-    @classmethod
-    def setUpClass(cls):
-        FIXTURE_ROOT.mkdir(parents=True, exist_ok=True)
-
     def test_single_task_defect_bisection(self):
         fixture = self.semantic()
         main0 = fixture.head("main")

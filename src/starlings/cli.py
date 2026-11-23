@@ -230,7 +230,7 @@ def warnings(policy):
             elif (policy.get("github") or {}).get("adapter") == "github":
                 result.append(f"{name}: the real GitHub adapter submits checks as workflow dispatches to the configured repository through the gh CLI; it is implemented but unqualified until a passing hosted gate is recorded.")
             else:
-                result.append(f"{name}: GitHub execution uses the deterministic local fake adapter — offline-qualified for routing, receipt binding, dispositions and recovery only; it proves nothing about real event delivery, billing, protections or runner parity.")
+                result.append(f"{name}: GitHub execution uses the deterministic local fake adapter — offline-qualified for routing, receipt binding, dispositions and recovery only; it proves nothing about real event delivery, protections or runner parity.")
         if gate["environment"] == "guest":
             result.append(f"{name}: guest execution uses the local docker daemon with the pinned image; parity is documented per profile and no security isolation is certified.")
         if gate["scope"] == "affected":

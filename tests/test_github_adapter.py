@@ -51,9 +51,9 @@ class AdapterCase(unittest.TestCase):
 class ProbeTests(AdapterCase):
     def test_probe_reports_authenticated_user(self):
         host = self.host()
-        self.gh.respond("api user", stdout=json.dumps({"login": "kaybarax"}))
+        self.gh.respond("api user", stdout=json.dumps({"login": "octocat"}))
         probe = host.probe()
-        self.assertEqual((probe["adapter"], probe["host"], probe["live"], probe["authenticated_as"]), ("github", "github.com", True, "kaybarax"))
+        self.assertEqual((probe["adapter"], probe["host"], probe["live"], probe["authenticated_as"]), ("github", "github.com", True, "octocat"))
         self.assertTrue(probe["gh"].endswith("gh"))
 
     def test_probe_failure_surfaces_as_adapter_error(self):

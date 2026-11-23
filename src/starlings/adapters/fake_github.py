@@ -14,7 +14,7 @@ It replays ``pull_request`` (opened/synchronized/merged/closed),
 ``check_run`` completed, ``merge_group`` checks_requested,
 ``workflow_dispatch``, ``push`` and run-lost (a submission whose
 completion event is suppressed). What it cannot prove is documented in
-docs/operations.md: real event delivery, billing, branch protections
+docs/operations.md: real event delivery, branch protections
 and runner parity all remain unproven until a passing hosted gate is
 recorded.
 """
