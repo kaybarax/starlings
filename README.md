@@ -6,8 +6,6 @@ Starlings facilitates running CI locally for a swarm of software engineering age
 
 Version 0.1.0 is the first release, and it covers the complete local workflow. Coordinating gates on hosted CI (GitHub Actions) is included as an experimental option that has not been tested end to end yet. See [Hosted checks on GitHub](#hosted-checks-on-github-experimental).
 
-**Why the name?** A flock of starlings in flight is called a murmuration: thousands of birds turning and regrouping together as one, without colliding. An agent swarm at work looks much the same, and Starlings exists to keep it organized as it moves.
-
 ## Why Starlings
 
 An agent swarm produces a lot of parallel work. Whether it comes from one harness or several, and whether its subagents work side by side or one after another, it all ends up in worktrees whose changes must be merged into `dev` and eventually into `main`. If every one of those branches triggers a full run on a paid hosted CI service, the bill and the waiting time grow with every task and every lane.
