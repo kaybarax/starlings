@@ -2,8 +2,9 @@
 
 Every adapter implements the same small surface:
 
-- ``probe()`` — confirm the adapter is usable now (the real adapter
-  raises ``hosted-unavailable``; the fake answers locally).
+- ``probe()`` — confirm the adapter is usable now (the fake answers
+  locally; the real adapter checks the ``gh`` CLI and its
+  authentication).
 - ``configure(workflow, routing)`` — register the project caller
   workflow and its allowed trigger bases and sources (idempotent).
 - ``submit_job(repo, name, workflow, revision, head_sha, event,
@@ -19,14 +20,15 @@ Every adapter implements the same small surface:
 - ``event_log()`` — every recorded event, in order.
 
 The fake adapter (``adapters.fake_github``) is the qualified offline
-implementation. The real adapter (``adapters.github``) is a stub that
-raises ``hosted-unavailable`` everywhere; the approved live rehearsal
-must prove real event delivery, billing, protections and runner parity
-before it may authorize anything.
+implementation. The real adapter (``adapters.github``) submits real
+workflow dispatches through the ``gh`` CLI; its qualified scope is the
+recorded live rehearsal — real event delivery, protections, billing
+and runner parity beyond that rehearsal remain unproven.
 """
 
 import json
 from pathlib import Path
+import shutil
 
 from ..batches import Failure, invalid
 
@@ -50,7 +52,7 @@ def binding(ctx, policy):
     if adapter == "github":
         from .github import GitHubHost
 
-        return GitHubHost(config)
+        return GitHubHost(config, ctx.root)
     raise invalid(f"github.adapter {adapter!r} is not one of fake, github")
 
 
@@ -176,5 +178,6 @@ def probe(root, policy):
             except (OSError, ValueError) as exc:
                 result["store_error"] = str(exc)
     else:
-        result.update({"available": False, "note": "real GitHub adapter is pending the approved live rehearsal"})
+        binary = shutil.which("gh")
+        result.update({"available": binary is not None, "gh": binary, "note": "the real GitHub adapter submits checks through the gh CLI; its qualified scope is the recorded live rehearsal"})
     return result

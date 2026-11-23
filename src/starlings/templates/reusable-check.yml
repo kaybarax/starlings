@@ -1,8 +1,13 @@
 name: starlings-check
 
-# Parameterized check job invoked by the project-owned caller workflow.
-# Each starlings gate submission is one call with the exact candidate
-# head SHA; the job records its conclusion, logs and declared artifacts.
+# Parameterized check job invoked by the project-owned caller workflow
+# (workflow_call) or by the starlings hosted adapter through
+# workflow_dispatch. Each starlings gate submission is one call with the
+# exact candidate head SHA; the job checks it out, runs the check argv,
+# records exit code, logs and declared artifacts, and uploads one
+# result artifact (result.json + stdout.txt + stderr.txt + staged/).
+run-name: "starlings/${{ inputs.run_id }}/${{ inputs.check_id }}/${{ inputs.attempt }}"
+
 on:
   workflow_call:
     inputs:
@@ -12,6 +17,62 @@ on:
       check_id:
         required: true
         type: string
+      run_id:
+        required: false
+        type: string
+        default: "manual"
+      attempt:
+        required: false
+        type: string
+        default: "1"
+      argv:
+        required: false
+        type: string
+        default: "[]"
+      artifacts:
+        required: false
+        type: string
+        default: "[]"
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        required: true
+        type: string
+        description: exact candidate commit to check out
+      check_id:
+        required: true
+        type: string
+        description: starlings check id
+      run_id:
+        required: true
+        type: string
+        description: starlings run id (run-<hex>)
+      attempt:
+        required: true
+        type: string
+        description: submission attempt
+      candidate_id:
+        required: false
+        type: string
+        default: ""
+      plan_id:
+        required: false
+        type: string
+        default: ""
+      repo:
+        required: false
+        type: string
+        default: ""
+      argv:
+        required: false
+        type: string
+        default: "[]"
+        description: check argv as a JSON array
+      artifacts:
+        required: false
+        type: string
+        default: "[]"
+        description: declared artifact paths as a JSON array
 
 permissions:
   contents: read
@@ -19,9 +80,62 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           ref: ${{ inputs.head_sha }}
       - name: starlings ${{ inputs.check_id }}
-        run: echo "starlings check ${{ inputs.check_id }} at ${{ inputs.head_sha }}"
+        env:
+          STARLINGS_ARGV: ${{ inputs.argv }}
+          STARLINGS_ARTIFACTS: ${{ inputs.artifacts }}
+          STARLINGS_CHECK_ID: ${{ inputs.check_id }}
+          STARLINGS_HEAD_SHA: ${{ inputs.head_sha }}
+          STARLINGS_RUN_ID: ${{ inputs.run_id }}
+          STARLINGS_ATTEMPT: ${{ inputs.attempt }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          argv = json.loads(os.environ["STARLINGS_ARGV"] or "[]")
+          declared = json.loads(os.environ["STARLINGS_ARTIFACTS"] or "[]")
+          stdout = pathlib.Path("stdout.txt")
+          stderr = pathlib.Path("stderr.txt")
+          if argv:
+              with stdout.open("w") as out, stderr.open("w") as err:
+                  exit_code = subprocess.run(argv, stdout=out, stderr=err, check=False).returncode
+          else:
+              stdout.write_text("")
+              stderr.write_text("starlings: no check argv supplied\n")
+              exit_code = 0
+          staged = pathlib.Path("staged")
+          produced = []
+          for relative in declared:
+              parts = pathlib.PurePosixPath(relative).parts
+              current = pathlib.Path(".")
+              unsafe = pathlib.PurePosixPath(relative).is_absolute() or any(part in ("", ".", "..") for part in parts)
+              for part in parts:
+                  current = current / part
+                  unsafe = unsafe or current.is_symlink()
+              source = pathlib.Path(relative)
+              if unsafe or not source.is_file():
+                  continue
+              target = staged / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source, target)
+              produced.append(relative)
+          result = {"exit_code": exit_code, "check_id": os.environ["STARLINGS_CHECK_ID"], "head_sha": os.environ["STARLINGS_HEAD_SHA"], "run_id": os.environ["STARLINGS_RUN_ID"], "attempt": os.environ["STARLINGS_ATTEMPT"], "produced": produced}
+          pathlib.Path("result.json").write_text(json.dumps(result, sort_keys=True) + "\n")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: starlings-${{ inputs.run_id }}-${{ inputs.check_id }}
+          path: |
+            result.json
+            stdout.txt
+            stderr.txt
+            staged/

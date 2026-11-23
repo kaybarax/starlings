@@ -20,3 +20,7 @@ jobs:
     with:
       head_sha: ${{ github.sha }}
       check_id: gate
+      run_id: "${{ github.run_id }}"
+      attempt: "${{ github.run_attempt }}"
+      argv: "[]"
+      artifacts: "[]"

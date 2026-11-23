@@ -2,6 +2,7 @@ import base64
 import json
 import unittest
 
+from fake_gh import FakeGh
 from fixtures import EXCLUDED, Fixture
 from test_verifier import FILES, LEDGER, build_policy, call, ok
 from starlings import promotion, runner, signer, verifier
@@ -352,15 +353,16 @@ class DispositionTests(GithubCase):
 
 
 class GithubStubTests(GithubCase):
-    def test_real_adapter_raises_hosted_unavailable(self):
+    def test_real_adapter_failure_surfaces_before_any_run(self):
+        FakeGh(self)
         fixture = self.make(github_policy(adapter="github"))
         self.ready(fixture)
         self.stage(fixture, {"ledger.txt": "total = 1\n"})
         plan = self.release_plan(fixture)
         outcome = call(fixture, runner.run, plan["plan_id"])
-        self.assertEqual(outcome[0], "blocked")
-        self.assertEqual(outcome[1].code, "hosted-unavailable")
-        self.assertIn("live rehearsal", outcome[1].message)
+        self.assertEqual(outcome[0], "failed")
+        self.assertEqual(outcome[1].code, "github-api")
+        self.assertIn("gh api user failed", outcome[1].message)
         with fixture.context() as ctx:
             self.assertEqual(ctx.store.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 0)
 

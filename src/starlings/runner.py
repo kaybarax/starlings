@@ -306,7 +306,7 @@ class Run:
     def execute_hosted(self, check, position, binding, event):
         config = self.policy["github"]
         required = list(self.policy.get("artifacts", {}).get(check, []))
-        submission = binding.submit_job(self.candidate["repository"], check, config["workflow"], config["reusable_workflow"], self.candidate["commit"], event, {"argv": list(self.policy["checks"][check]), "artifacts": required, "timeout": self.timeout, "objects": str(self.mirror)})
+        submission = binding.submit_job(self.candidate["repository"], check, config["workflow"], config["reusable_workflow"], self.candidate["commit"], event, {"argv": list(self.policy["checks"][check]), "artifacts": required, "timeout": self.timeout, "objects": str(self.mirror), "run_id": self.run_id, "plan_id": self.plan_row["id"], "candidate_id": self.candidate["id"]})
         metrics = {"environment": "native", "executor": "github", "timeout_seconds": self.timeout, "hosted": True, "host": submission}
         self.ctx.hook("host-submitted", {"run": self.run_id, "check": check, "host_run": submission["run_id"], "attempt": submission["attempt"]})
         deadline, completion = time.monotonic() + self.timeout, None
