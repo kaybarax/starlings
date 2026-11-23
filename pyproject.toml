@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "starlings"
 version = "0.1.0"
-description = "Offline policy and contracts for a configurable local verification workflow"
+description = "Choose when and where CI runs for a software engineering agent swarm."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

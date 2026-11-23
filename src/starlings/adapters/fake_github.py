@@ -15,7 +15,8 @@ It replays ``pull_request`` (opened/synchronized/merged/closed),
 ``workflow_dispatch``, ``push`` and run-lost (a submission whose
 completion event is suppressed). What it cannot prove is documented in
 docs/operations.md: real event delivery, billing, branch protections
-and runner parity all require the separately approved live rehearsal.
+and runner parity all remain unproven until a passing hosted gate is
+recorded.
 """
 
 import base64

@@ -214,7 +214,7 @@ class GitHubHost:
     def probe(self):
         binary = self.binary()
         user = self.api("user")
-        return {"adapter": "github", "host": self.host, "gh": binary, "live": True, "authenticated_as": user.get("login"), "note": "real adapter: submits workflow dispatches through gh; the qualified scope is the recorded live rehearsal"}
+        return {"adapter": "github", "host": self.host, "gh": binary, "live": True, "authenticated_as": user.get("login"), "note": "real adapter: submits workflow dispatches through gh; implemented but unqualified until a passing hosted gate is recorded"}
 
     def adapter_record(self):
         return Adapter("github", "1", ("submit_job", "completion", "replay", "pull_requests", "event_log")).to_dict()

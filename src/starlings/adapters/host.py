@@ -21,9 +21,9 @@ Every adapter implements the same small surface:
 
 The fake adapter (``adapters.fake_github``) is the qualified offline
 implementation. The real adapter (``adapters.github``) submits real
-workflow dispatches through the ``gh`` CLI; its qualified scope is the
-recorded live rehearsal — real event delivery, protections, billing
-and runner parity beyond that rehearsal remain unproven.
+workflow dispatches through the ``gh`` CLI; it is implemented but
+unqualified — no passing hosted gate has been recorded, so real event
+delivery, protections, billing and runner parity remain unproven.
 """
 
 import json
@@ -33,10 +33,6 @@ import shutil
 from ..batches import Failure, invalid
 
 BINDING_FIELDS = ("adapter", "host", "repo", "event", "run_id", "attempt", "workflow", "revision", "head_sha")
-
-
-def hosted_unavailable():
-    return Failure("blocked", "hosted-unavailable", "the real GitHub adapter is not qualified yet: the approved live rehearsal is pending and nothing is sent anywhere; use adapter = \"fake\" for offline hosted-gate qualification")
 
 
 def binding(ctx, policy):
@@ -179,5 +175,5 @@ def probe(root, policy):
                 result["store_error"] = str(exc)
     else:
         binary = shutil.which("gh")
-        result.update({"available": binary is not None, "gh": binary, "note": "the real GitHub adapter submits checks through the gh CLI; its qualified scope is the recorded live rehearsal"})
+        result.update({"available": binary is not None, "gh": binary, "note": "the real GitHub adapter submits checks through the gh CLI; it is implemented but unqualified until a passing hosted gate is recorded"})
     return result
