@@ -3,7 +3,7 @@ from pathlib import Path
 import stat
 
 
-ENTRIES = ("policy", "logs", "evidence", "artifacts", "signer-references", "journal.sqlite3", "starlings.db", "starlings.db-wal", "starlings.db-shm", "mirrors", "worktrees")
+ENTRIES = ("policy", "logs", "evidence", "artifacts", "signer-references", "journal.sqlite3", "starlings.db", "starlings.db-wal", "starlings.db-shm", "mirrors", "worktrees", "adapters")
 FILES = ("journal.sqlite3", "starlings.db", "starlings.db-wal", "starlings.db-shm")
 
 

@@ -1,0 +1,27 @@
+name: starlings-check
+
+# Parameterized check job invoked by the project-owned caller workflow.
+# Each starlings gate submission is one call with the exact candidate
+# head SHA; the job records its conclusion, logs and declared artifacts.
+on:
+  workflow_call:
+    inputs:
+      head_sha:
+        required: true
+        type: string
+      check_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ inputs.head_sha }}
+      - name: starlings ${{ inputs.check_id }}
+        run: echo "starlings check ${{ inputs.check_id }} at ${{ inputs.head_sha }}"

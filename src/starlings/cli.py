@@ -12,6 +12,8 @@ import threading
 
 from . import __version__
 from . import batches, demo, diagnose, enforcement, examples, gitops, promotion, runner, signer, verifier
+from .adapters import host as adapters_host
+from .adapters import templates as adapters_templates
 from .gitops import GitError
 from .policy import PRESETS, PolicyError, parse, preset, render
 from .state import layout
@@ -86,6 +88,11 @@ def parser():
     example_init.add_argument("--with-qualification", action="store_true", help="add the assembly, selection, artifact and exclusive tables used by qualification runs")
     demo = commands.add_parser("demo", help="run a small end-to-end demo in a disposable directory")
     demo.add_argument("--directory", required=True, type=Path, help="disposable directory for the demo; created if absent and must be empty if it exists")
+    templates = commands.add_parser("templates", help="preview or exclusively write optional workflow templates").add_subparsers(dest="action", required=True, parser_class=Parser)
+    templates_github = templates.add_parser("github", help="write the caller and reusable check workflow templates for a [github] policy into .github/workflows")
+    writes = templates_github.add_mutually_exclusive_group()
+    writes.add_argument("--preview", action="store_true", help="preview only (default)")
+    writes.add_argument("--write", action="store_true", help="write the workflow files; never replace existing files")
     authority = commands.add_parser("authority", help="protect a local bare authority with the generated enforcement hook, or evaluate a ref update for the hook").add_subparsers(dest="action", required=True, parser_class=Parser)
     protect = authority.add_parser("protect", help="install the generated update/reference-transaction hook into a bare authority and record its digest")
     protect.add_argument("--authority", required=True, type=Path, help="absolute path to a local bare repository")
@@ -139,7 +146,7 @@ def parser():
         command.add_argument("--lease-seconds", type=int, default=600)
     for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent):
         command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR)")
-    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect):
+    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github):
         command.add_argument("--directory", type=Path, default=Path.cwd(), help="existing project directory")
     return result
 
@@ -218,7 +225,12 @@ def warnings(policy):
         if gate["scope"] == "none":
             continue
         if gate["executor"] == "github":
-            result.append(f"{name}: GitHub execution is unsupported; configuration is not execution support.")
+            if name == "task":
+                result.append(f"{name}: GitHub execution is unsupported on the task gate; configuration is not execution support.")
+            elif (policy.get("github") or {}).get("adapter") == "github":
+                result.append(f"{name}: the real GitHub adapter is pending the approved live rehearsal and refuses submissions (hosted-unavailable); nothing is sent anywhere.")
+            else:
+                result.append(f"{name}: GitHub execution uses the deterministic local fake adapter — offline-qualified for routing, receipt binding, dispositions and recovery only; it proves nothing about real event delivery, billing, protections or runner parity.")
         if gate["environment"] == "guest":
             result.append(f"{name}: guest execution uses the local docker daemon with the pinned image; parity is documented per profile and no security isolation is certified.")
         if gate["scope"] == "affected":
@@ -248,10 +260,24 @@ def perform(args, json_output=False):
     if args.command == "policy":
         policy = parse(manifest.read_text(encoding="utf-8"))
         return {"valid": True, "path": str(manifest), "policy": policy, "warnings": warnings(policy)}
+    if args.command == "templates":
+        policy = parse(manifest.read_text(encoding="utf-8"))
+        files = adapters_templates.render(policy)
+        if args.write:
+            for relative in files:
+                target = root / relative
+                if target.exists() or target.is_symlink():
+                    raise batches.Failure("conflict", "conflict", f"{relative} already exists; nothing was replaced", {"path": str(target)})
+            for relative, content in files.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                exclusive_write(target, content)
+        preview = "".join(f"# === {relative} ===\n{content}\n" for relative, content in files.items())
+        return {"written": args.write, "path": str(root / ".github" / "workflows"), "files": files, "toml": preview, "warnings": warnings(policy)}
     state = layout(root, args.state_dir)
     policy = parse(manifest.read_text(encoding="utf-8")) if manifest.exists() else None
     hook = enforcement.probe(args.state_dir, args.authority)
-    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
+    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "adapters": adapters_host.probe(state["root"], policy), "unsupported": ["remote authorities", "deployment", "live hosted execution (pending rehearsal)", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
 
 
 def probe(function):

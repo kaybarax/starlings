@@ -706,6 +706,7 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
     try:
         ctx.hook("target-lease", {"batch": batch, "lanes": lanes})
         from . import promotion
+        from .adapters import host as adapters_host
         recovery = promotion.reconcile_target(ctx, lease, str(authority), target)
         if recovery:
             result["recovery"] = recovery
@@ -731,7 +732,9 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
                 with ctx.store.transaction() as tx:
                     ctx.store.check(tx, lease)
                     finalize(tx, batch, landed["id"], names)
-                result["candidates"].append({**candidate_entry(landed), "state": "staged", "reconciled": True})
+                entry = {**candidate_entry(landed), "state": "staged", "reconciled": True}
+                entry["dispositions"] = adapters_host.record_dispositions(ctx, b, names, landed["commit_sha"])
+                result["candidates"].append(entry)
                 continue
             already = [name for name, tip in zip(names, tips) if tip != b["base"] and gitops.is_ancestor(mirror, tip, old)]
             if already:
@@ -788,6 +791,7 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
             with ctx.store.transaction() as tx:
                 finalize(tx, batch, candidate.id, names)
             entry["state"] = "staged"
+            entry["dispositions"] = adapters_host.record_dispositions(ctx, b, names, commit)
             result["candidates"].append(entry)
         result["staging_head"] = gitops.resolve(authority, target)
     except LeaseLost as exc:
@@ -819,4 +823,5 @@ def status(ctx, batch):
     promotions = [{"id": row["id"], "state": row["state"], "gate": row["gate"], "plan_id": row["plan_id"], "receipt_id": row["receipt_id"], "target": row["target"], "repository": row["repository"], "old": row["old"], "new": row["new"], "observed": row["observed"], "resolution": row["resolution"], "approvals": json.loads(row["approvals"]), "record": json.loads(row["record"]) if row["record"] else None} for row in c.execute("SELECT * FROM promotions WHERE batch = ? ORDER BY created, id", (batch,)).fetchall()]
     approvals = [{"id": row["id"], "plan_id": row["plan_id"], "by": row["by_identity"], "review": row["review"], "granted_at": row["granted_at"], "expires_at": row["expires_at"], "revoked_at": row["revoked_at"], "live": row["revoked_at"] is None and row["expires_at"] > ctx.store.clock()} for row in c.execute("SELECT a.* FROM approvals a JOIN plans p ON p.id = a.plan_id WHERE p.batch = ? ORDER BY a.granted_at, a.rowid", (batch,)).fetchall()]
     intents = [dict(row) for row in c.execute("SELECT * FROM include_intents WHERE batch = ? ORDER BY lane", (batch,)).fetchall()]
-    return "ok", {**batch_summary(b, None), "lanes": lanes, "tasks": tasks, "resolutions": resolutions, "stage_resolutions": stage_resolutions, "candidates": candidates, "task_candidates": task_candidates, "promotions": promotions, "approvals": approvals, "include_intents": intents, "authority_heads": {b["staging"]: gitops.resolve(authority, f"refs/heads/{b['staging']}"), b["release"]: gitops.resolve(authority, f"refs/heads/{b['release']}")}}
+    dispositions = [dict(row) for row in c.execute("SELECT * FROM dispositions WHERE batch = ? ORDER BY kind, name", (batch,)).fetchall()]
+    return "ok", {**batch_summary(b, None), "lanes": lanes, "tasks": tasks, "resolutions": resolutions, "stage_resolutions": stage_resolutions, "candidates": candidates, "task_candidates": task_candidates, "promotions": promotions, "approvals": approvals, "include_intents": intents, "dispositions": dispositions, "authority_heads": {b["staging"]: gitops.resolve(authority, f"refs/heads/{b['staging']}"), b["release"]: gitops.resolve(authority, f"refs/heads/{b['release']}")}}

@@ -4,7 +4,7 @@ Choose where your CI runs when many coding agents work on one repository in para
 
 ## Status
 
-**Under active development, not yet released.** Local milestones 1–5 of 6 are complete; the optional GitHub milestone has not started. Commands, the policy schema and file formats can still change, so do not rely on starlings for real projects yet.
+**Under active development, not yet released.** Local milestones 1–5 of 6 are complete; the optional GitHub milestone is in progress: its offline half is qualified against a deterministic local fake host, and the live hosted rehearsal is not authorized yet. Commands, the policy schema and file formats can still change, so do not rely on starlings for real projects yet.
 
 | Milestone | What it delivers | Status |
 | --- | --- | --- |
@@ -13,9 +13,9 @@ Choose where your CI runs when many coding agents work on one repository in para
 | 3. Verifier and runner | Gate planning, check execution, signed receipts, stale-result checks | Done |
 | 4. Promotion and recovery | Guarded landing on staging and release, recovery after an interruption | Done |
 | 5. Local qualification | Four lanes and 32 tasks under every preset, with benchmarks | Done (local) |
-| 6. Optional GitHub operation | Hosted checks on GitHub Actions and pull request publishing | Not started |
+| 6. Optional GitHub operation | Hosted checks on GitHub Actions and pull request publishing | In progress (offline qualified; live rehearsal pending) |
 
-This table is updated as each milestone is completed. Everything below describes the local path: a local bare Git repository as the authority, with checks run on your own machine. The one unfinished milestone is optional and noted where it appears.
+This table is updated as each milestone is completed. Everything below describes the local path: a local bare Git repository as the authority, with checks run on your own machine. The one unfinished piece of the optional milestone — a live rehearsal against a real GitHub remote — is noted where it appears.
 
 ## Why starlings
 
@@ -131,7 +131,7 @@ A typical split of roles:
 
 `starlings authority protect --authority <authority-path>` installs a generated update hook into the authority that refuses writes to the recorded staging and release refs unless they match an intent starlings journaled first — a raw `git push` or `git update-ref` to those branches fails while `stage` and `promote` keep working. This guards against drift and accidents: a same-login agent that deliberately edits, deletes or bypasses the hook can still write the refs directly, so keep telling your agents in your project's instruction files to use starlings for every merge and never to write to lane, staging or release branches directly. `starlings doctor --authority <authority-path>` reports whether the hook is installed, unmodified and recorded.
 
-**Planned:** ready-made instruction templates for specific agent tools, and hosted execution on GitHub Actions.
+**Planned:** ready-made instruction templates for specific agent tools, and the approved live rehearsal that qualifies hosted execution on real GitHub Actions (the offline fake-host qualification is already in place).
 
 ## Commands
 
@@ -141,6 +141,7 @@ A typical split of roles:
 | Batch, tasks and lanes | `batch prepare`, `task assign`, `task handoff`, `lane assemble`, `lane resolve`, `lane freeze`, `stage`, `status` | Move work from task worktrees into lanes and onto staging. |
 | Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks, and validate the receipt. |
 | Diagnostics | `diagnose` | Rebuild frozen lane subsets of a failed release candidate and re-run the failed checks to name the responsible task or lane pair; results never authorize a promotion. |
+| Publishing | `templates github` | Preview or exclusively write the optional GitHub caller and reusable check workflows into `.github/workflows`; nothing touches `.github` unless asked. |
 | Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate, and reconcile after an interruption. |
 
 Exit statuses are stable and documented in [docs/policy.md](docs/policy.md). Full options and semantics are in [docs/operations.md](docs/operations.md).
@@ -196,7 +197,7 @@ The signing key is stored unencrypted and is protected only by the state directo
 
 ## Limitations
 
-- **Local only.** In v1 the authority must be a local bare repository and every enabled gate must use executor `local`. Remote authorities, hosted execution and deployment are unsupported; `github` is accepted policy vocabulary — including on the task gate — but `policy show`/`validate` warns it is unsupported and `plan` blocks any non-local executor.
+- **Local only.** In v1 the authority must be a local bare repository. Remote authorities and deployment are unsupported. Staging and release gates may name executor `github` with an optional `[github]` table: the default `fake` adapter is a deterministic local simulation (offline-qualified for routing, receipt binding, dispositions and lost-response recovery only; it proves nothing about real event delivery, billing, protections or runner parity), and `adapter = "github"` is a stub that refuses every call with `hosted-unavailable` until the approved live rehearsal. The task gate stays local-only (`plan` blocks `unsupported`), and hosted checks require environment `native`. See [docs/policy.md](docs/policy.md) and the hosted-execution section of [docs/operations.md](docs/operations.md).
 - **Hook-based enforcement only.** `authority protect` refuses unrecorded writes to staging and release refs via a generated authority hook, but a same-login user or agent can still edit or delete the hook, run git with hooks disabled, or use an unprotected authority. It guards drift and accidents, not credentials.
 - **One coordinator machine.** Checks within a run execute one after another; task worktrees are not cleaned up automatically; assembly leases do not supervise processes.
 - **Native checks are trusted.** They run as you and can read the state directory, including the signing key. `memory_mib` and `disk_mib` are recorded, not enforced, and a descendant that calls `setsid`/`setpgid` escapes process-group tracking. Use native execution only for contributors you trust.

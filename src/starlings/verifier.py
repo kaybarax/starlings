@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from . import gitops, signer
+from .adapters import host as adapters_host
 from .batches import Failure, check_object, check_text, default_owner, invalid, load_batch, refs
 from .contracts import LANE_REF, Candidate, Evidence, Plan, Receipt
 from .policy import PolicyError, parse
@@ -221,8 +222,13 @@ def plan(ctx, batch, gate, candidate_id=None):
     config = policy["gates"][gate]
     if config["scope"] == "none":
         raise Failure("blocked", "gate-disabled", f"the {gate} gate has scope none in the trusted policy; nothing to plan")
-    if config["executor"] != "local":
-        raise Failure("blocked", "unsupported", f"the {gate} gate uses executor {config['executor']!r}; only local execution is implemented")
+    executor = config["executor"]
+    if executor == "github" and gate == "task":
+        raise Failure("blocked", "unsupported", "the task gate runs local execution only in v1; executor github is reserved for staging and release gates")
+    if executor not in ("local", "github"):
+        raise Failure("blocked", "unsupported", f"the {gate} gate uses executor {executor!r}; only local and github executors are accepted")
+    if executor == "github" and "github" not in policy:
+        raise Failure("blocked", "unsupported", f"the {gate} gate uses executor github but the trusted policy has no [github] table; add it, review and freeze again")
     if gate == "release":
         if candidate_id is not None:
             raise invalid("--candidate applies only to the staging and task gates; release planning constructs its own candidate")
@@ -234,8 +240,8 @@ def plan(ctx, batch, gate, candidate_id=None):
     mirror = Path(b["mirror"])
     changed = gitops.changed_paths(mirror, candidate.base, candidate.commit)
     selection, checks, unmapped, unmapped_checks = select(policy, gate, changed)
-    inputs = {"candidate": candidate.to_dict(), "policy_digest": trusted["digest"], "gate": gate, "changed": changed, "selection": selection, "checks": {check: policy["checks"][check] for check in checks}, "globs": policy.get("selection", {}), "artifacts": {check: policy.get("artifacts", {}).get(check, []) for check in checks}, "exclusive": {check: policy.get("exclusive", {}).get(check, []) for check in checks}, "limits": policy["limits"], "guest": policy.get("guest") if config["environment"] == "guest" else None}
-    record = Plan(candidate.id, trusted["digest"], gate, tuple(checks), config["executor"], config["environment"], selection, request_digest(inputs))
+    inputs = {"candidate": candidate.to_dict(), "policy_digest": trusted["digest"], "gate": gate, "changed": changed, "selection": selection, "checks": {check: policy["checks"][check] for check in checks}, "globs": policy.get("selection", {}), "artifacts": {check: policy.get("artifacts", {}).get(check, []) for check in checks}, "exclusive": {check: policy.get("exclusive", {}).get(check, []) for check in checks}, "limits": policy["limits"], "guest": policy.get("guest") if config["environment"] == "guest" else None, "github": policy.get("github") if executor == "github" else None}
+    record = Plan(candidate.id, trusted["digest"], gate, tuple(checks), executor, config["environment"], selection, request_digest(inputs))
     with ctx.store.transaction() as tx:
         repeated = tx.execute("SELECT 1 FROM plans WHERE id = ?", (record.id,)).fetchone() is not None
         if not repeated:
@@ -268,6 +274,54 @@ def safe_file(root, relative):
         if current.is_symlink():
             return None
     return path if path.is_file() else None
+
+
+def hosted_reasons(ctx, plan_row, plan_record, candidate, rows):
+    reasons = []
+    policy = json.loads(plan_row["policy"])
+    config = policy.get("github")
+    if not config:
+        return ["the plan's policy has no [github] table for an executor-github receipt"]
+    lanes = adapters_host.candidate_lanes(ctx.store.connection, plan_row)
+    expected_event = adapters_host.submission_event(policy, plan_row["batch"], plan_record["gate"], lanes)
+    expected = {"adapter": config.get("adapter", "fake"), "host": config.get("host", "fake.local"), "repo": candidate["repository"], "workflow": config["workflow"], "revision": config["reusable_workflow"], "head_sha": candidate["commit"]}
+    bound = []
+    for item in rows:
+        metrics = json.loads(item["metrics"])
+        host = metrics.get("host")
+        if type(host) is not dict:
+            reasons.append(f"evidence for {item['check_id']} has no host binding")
+            continue
+        for key, value in expected.items():
+            if host.get(key) != value:
+                reasons.append(f"evidence for {item['check_id']} binds host {key} {host.get(key)!r}, expected {value!r}")
+        if host.get("event") != expected_event:
+            reasons.append(f"evidence for {item['check_id']} binds submission event {host.get('event')!r}, expected {expected_event!r}")
+        if type(host.get("run_id")) is not str or type(host.get("attempt")) is not int or host.get("attempt", 0) < 1:
+            reasons.append(f"evidence for {item['check_id']} has no valid host run id or attempt")
+        else:
+            bound.append((item, host))
+    try:
+        adapter = adapters_host.binding(ctx, policy)
+        log = adapter.event_log()
+    except Failure as exc:
+        log, reasons_extra = None, [f"adapter event log is unavailable: {exc.code}"]
+        reasons += reasons_extra
+    if log is not None:
+        for item, host in bound:
+            requested = next((event for event in log if event.get("type") == "workflow_run" and event.get("action") == "requested" and event.get("run_id") == host["run_id"] and event.get("attempt") == host["attempt"]), None)
+            if requested is None:
+                reasons.append(f"adapter event log has no matching requested workflow_run for {item['check_id']} (run {host['run_id']} attempt {host['attempt']})")
+            elif any(requested.get(key) != value for key, value in (("name", item["check_id"]), ("repo", host.get("repo")), ("workflow", host.get("workflow")), ("revision", host.get("revision")), ("head_sha", host.get("head_sha")), ("event", host.get("event")))):
+                reasons.append(f"adapter event log's requested workflow_run for {item['check_id']} (run {host['run_id']} attempt {host['attempt']}) does not match the bound submission")
+            found = next((event for event in log if event.get("type") == "workflow_run" and event.get("action") == "completed" and event.get("run_id") == host["run_id"] and event.get("attempt") == host["attempt"] and event.get("name") == item["check_id"] and event.get("workflow") == host.get("workflow") and event.get("revision") == host.get("revision") and event.get("head_sha") == host.get("head_sha")), None)
+            if found is None:
+                reasons.append(f"adapter event log has no matching completed workflow_run for {item['check_id']} (run {host['run_id']} attempt {host['attempt']})")
+            elif found.get("conclusion") == "success" and item["status"] not in ("passed", "missing-artifact"):
+                reasons.append(f"adapter log records conclusion 'success' for {item['check_id']} but evidence status is {item['status']!r}")
+            elif found.get("conclusion") in ("failure", "cancelled", "skipped", "timed_out") and item["status"] == "passed":
+                reasons.append(f"adapter log records conclusion {found['conclusion']!r} for {item['check_id']} but evidence status is 'passed'")
+    return reasons
 
 
 def assess(ctx, receipt_id, target=None):
@@ -323,6 +377,8 @@ def assess(ctx, receipt_id, target=None):
                 invalid_reasons.append(f"evidence for {item['check_id']} does not match its content ID")
         if sorted(path for item in rows for path in json.loads(item["files"])) != sorted(digests):
             invalid_reasons.append("receipt binds files that no evidence lists")
+    if plan_record["executor"] == "github":
+        invalid_reasons += hosted_reasons(ctx, plan_row, plan_record, candidate, rows)
     trusted = current_trust(c, row["authority"])
     if trusted is None or trusted["digest"] != record.policy_digest:
         stale_reasons.append(f"policy {record.policy_digest} is no longer the trusted policy for {row['authority']}" + (f" (now {trusted['digest']})" if trusted else ""))

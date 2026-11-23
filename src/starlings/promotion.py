@@ -7,6 +7,7 @@ import signal
 import time
 
 from . import enforcement, gitops
+from .adapters import host as adapters_host
 from .batches import Failure, check_text, default_owner, finalize, invalid, load_batch, load_lane, refs
 from .contracts import Approval, Promotion
 from .store import LeaseHeld, LeaseLost
@@ -164,6 +165,8 @@ def reconcile_target(ctx, lease, repository, target):
                 ctx.store.check(tx, lease)
                 record = complete(ctx, tx, row, observed)
             action.update({"state": "landed", "promotion": record.to_dict() if record else None})
+            if record is not None and row["gate"] == "staging":
+                action.update(disposition_view(ctx, row["batch"], row["candidate_id"], row["new"]))
         elif observed == row["old"]:
             mark(ctx, lease, row["id"], "not-applied", observed)
             action["state"] = "not-applied"
@@ -172,6 +175,16 @@ def reconcile_target(ctx, lease, repository, target):
             action.update({"state": "ambiguous", "reasons": problems})
         actions.append(action)
     return actions
+
+
+def disposition_view(ctx, batch, candidate_id, commit):
+    try:
+        c = ctx.store.connection
+        b = load_batch(c, batch)
+        lanes = json.loads(c.execute("SELECT lanes FROM candidates WHERE id = ?", (candidate_id,)).fetchone()["lanes"])
+        return {"dispositions": adapters_host.record_dispositions(ctx, b, lanes, commit)}
+    except Failure as exc:
+        return {"dispositions_error": str(exc)}
 
 
 def landed_view(row, repeated):
@@ -315,6 +328,8 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected
             result["state"] = final
             raise Failure("stale", "lease-lost", f"promotion {promotion_id} was already reconciled as {final} by another coordinator; this worker did not finalize it", result)
         result.update({"state": "landed", "landed": {"commit": new, "tree": candidate["tree"], "parents": candidate["parents"]}, "promotion": record.to_dict(), "repeated": False})
+        if gate == "staging":
+            result.update(disposition_view(ctx, b["name"], candidate["id"], new))
         if gate == "release":
             result["note"] = f"{target} in the authority now records the released commit {new}; deployment is out of scope and requires its own authorization"
     except LeaseLost as exc:

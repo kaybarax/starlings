@@ -6,6 +6,8 @@ PRESETS = ("release-only", "combined-lanes-release", "each-lane-release", "every
 
 RESOURCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
+REUSABLE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
+WORKFLOW = re.compile(r"\.github/workflows/[a-zA-Z0-9][a-zA-Z0-9._-]*\.(yml|yaml)")
 
 
 class PolicyError(ValueError):
@@ -39,7 +41,7 @@ def strings(value, path, nonempty=True):
 
 
 def validate(data):
-    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest"))
+    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github"))
     require(type(data["schema"]) is int and data["schema"] == 1, "schema", "only integer schema version 1 is supported")
     text(data["project"], "project")
     for key in ("staging", "release"):
@@ -109,6 +111,22 @@ def validate(data):
         table(data["guest"], "guest", ("image",))
         require(type(data["guest"]["image"]) is str and bool(IMAGE.fullmatch(data["guest"]["image"])), "guest.image", "expected an image pinned by digest, name@sha256:<64 lowercase hex>")
     require("guest" in data or not any(gate["scope"] != "none" and gate.get("environment") == "guest" for gate in data["gates"].values()), "guest.image", "required when an enabled gate uses environment guest")
+    if "github" in data:
+        table(data["github"], "github", (), ("adapter", "host", "reusable_workflow", "workflow"))
+        if "adapter" in data["github"]:
+            choice(data["github"]["adapter"], "github.adapter", ("fake", "github"))
+        if "host" in data["github"]:
+            text(data["github"]["host"], "github.host")
+        if "reusable_workflow" in data["github"]:
+            require(type(data["github"]["reusable_workflow"]) is str and bool(REUSABLE.fullmatch(data["github"]["reusable_workflow"])), "github.reusable_workflow", "expected a reusable workflow reference pinned as path@<40 lowercase hex>")
+        if "workflow" in data["github"]:
+            require(type(data["github"]["workflow"]) is str and bool(WORKFLOW.fullmatch(data["github"]["workflow"])), "github.workflow", "expected a project caller workflow path .github/workflows/<name>.yml or .yaml")
+    hosted = [name for name, gate in data["gates"].items() if gate["scope"] != "none" and gate.get("executor") == "github"]
+    for name in hosted:
+        require("github" in data, "github", "required when an enabled gate uses executor github")
+        for key in ("reusable_workflow", "workflow"):
+            require(key in data["github"], f"github.{key}", "required when an enabled gate uses executor github")
+        require(data["gates"][name].get("environment") == "native", f"gates.{name}.environment", "github gates require environment native in v1")
     return data
 
 
@@ -133,7 +151,10 @@ def preset(name, executor="local"):
         enabled = gate == "release" or (gate == "staging" and name != PRESETS[0]) or (gate == "task" and name == PRESETS[3])
         gates[gate] = {"scope": "full" if enabled else "none", "executor": executor, "environment": "native", "checks": ["example"] if enabled else []}
     gates["staging"]["mode"] = "combined-ready" if name == PRESETS[1] else "each-lane"
-    return validate({"schema": 1, "project": "example-project", "staging": "dev", "release": "main", "fully_verified_release": True, "authority": {"mode": "local-bare"}, "gates": gates, "checks": {"example": ["python3", "-c", "raise SystemExit('Replace this synthetic example with reviewed project checks')"]}, "limits": {"cpu_slots": 2, "memory_mib": 4096, "disk_mib": 10240, "max_guests": 0, "timeout_seconds": 1800}})
+    data = {"schema": 1, "project": "example-project", "staging": "dev", "release": "main", "fully_verified_release": True, "authority": {"mode": "local-bare"}, "gates": gates, "checks": {"example": ["python3", "-c", "raise SystemExit('Replace this synthetic example with reviewed project checks')"]}, "limits": {"cpu_slots": 2, "memory_mib": 4096, "disk_mib": 10240, "max_guests": 0, "timeout_seconds": 1800}}
+    if executor == "github":
+        data["github"] = {"adapter": "fake", "host": "example.invalid", "reusable_workflow": "example/workflows/reusable-check.yml@" + "0" * 40, "workflow": ".github/workflows/starlings-caller.yml"}
+    return validate(data)
 
 
 def render(data):
@@ -142,7 +163,7 @@ def render(data):
     def value(item):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
     lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release")]
-    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest") if section in data), ("limits", data["limits"])]:
+    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github") if section in data), ("limits", data["limits"])]:
         lines.extend(["", f"[{section}]"])
         lines.extend(f"{key} = {value(item)}" for key, item in entries.items())
     return "\n".join(lines) + "\n"

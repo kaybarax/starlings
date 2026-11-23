@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from pathlib import Path
@@ -289,6 +290,62 @@ class Run:
         self.record_evidence(check, position, evidence, status, manifest, metrics, reaped)
         return {"check": check, "status": status, "exit_code": evidence.exit_code, "evidence_id": evidence.id, "files": manifest, "metrics": metrics}, reaped
 
+    def collect_hosted(self, check, artifacts):
+        files = {}
+        for relative, encoded in sorted(artifacts.items()):
+            parts = relative.split("/")
+            if relative.startswith("/") or ".." in parts or not all(parts):
+                continue
+            directory = private_dir(self.ctx.root, "artifacts", self.run_id, check, *parts[:-1])
+            target = directory / parts[-1]
+            with os.fdopen(create_private(target), "wb") as writer:
+                writer.write(base64.b64decode(encoded))
+            files[f"artifacts/{self.run_id}/{check}/{relative}"] = None
+        return files
+
+    def execute_hosted(self, check, position, binding, event):
+        config = self.policy["github"]
+        required = list(self.policy.get("artifacts", {}).get(check, []))
+        submission = binding.submit_job(self.candidate["repository"], check, config["workflow"], config["reusable_workflow"], self.candidate["commit"], event, {"argv": list(self.policy["checks"][check]), "artifacts": required, "timeout": self.timeout, "objects": str(self.mirror)})
+        metrics = {"environment": "native", "executor": "github", "timeout_seconds": self.timeout, "hosted": True, "host": submission}
+        self.ctx.hook("host-submitted", {"run": self.run_id, "check": check, "host_run": submission["run_id"], "attempt": submission["attempt"]})
+        deadline, completion = time.monotonic() + self.timeout, None
+        while time.monotonic() < deadline and not self.cancelled():
+            completion = binding.completion(submission)
+            if completion is not None:
+                break
+            time.sleep(POLL)
+        if completion is None:
+            if not self.cancelled():
+                metrics["pending_for_seconds"] = round(self.timeout, 3)
+                return {"check": check, "status": "host-pending", "submission": submission, "metrics": metrics}, True
+            data, code, status = {}, -15, "cancelled"
+        else:
+            data = completion.get("result") or {}
+            code = int(data.get("exit_code") or 0)
+            if completion.get("head_sha") != submission["head_sha"]:
+                status, code = "stale", -1
+            else:
+                status = {"success": "passed", "failure": "failed", "timed_out": "timeout"}.get(data.get("conclusion"), "failed")
+        logs = private_dir(self.ctx.root, "logs", self.run_id)
+        out_path, err_path = logs / f"{check}.out", logs / f"{check}.err"
+        with os.fdopen(create_private(out_path), "w", encoding="utf-8") as out:
+            out.write(data.get("stdout") or "")
+        with os.fdopen(create_private(err_path), "w", encoding="utf-8") as err:
+            err.write(data.get("stderr") or "")
+        files = {f"logs/{self.run_id}/{check}.out": None, f"logs/{self.run_id}/{check}.err": None}
+        missing = []
+        if status != "cancelled":
+            files.update(self.collect_hosted(check, data.get("artifacts") or {}))
+            missing = sorted(set(required) - {path.removeprefix(f"artifacts/{self.run_id}/{check}/") for path in files if path.startswith("artifacts/")})
+            if missing and status == "passed":
+                status = "missing-artifact"
+        manifest = {path: file_digest(self.ctx.root / path) for path in sorted(files)}
+        evidence = Evidence(self.record["id"], check, max(-255, min(255, code)), request_digest(manifest))
+        metrics.update({"duration_seconds": data.get("duration_seconds"), "conclusion": data.get("conclusion"), "missing_artifacts": missing, "host_event": {key: completion[key] for key in ("seq", "run_id", "attempt", "head_sha", "conclusion") if completion and key in completion}})
+        self.record_evidence(check, position, evidence, status, manifest, metrics, True)
+        return {"check": check, "status": status, "exit_code": evidence.exit_code, "evidence_id": evidence.id, "files": manifest, "metrics": metrics}, True
+
     def record_process(self, check, process, job, worktree):
         with self.ctx.store.transaction() as c:
             c.execute("INSERT OR REPLACE INTO run_processes(run_id, check_id, pgid, job, worktree) VALUES (?, ?, ?, ?, ?)", (self.run_id, check, process.pid, str(job), str(worktree)))
@@ -342,6 +399,18 @@ def run(ctx, plan_id, force_fresh=False, timeout=None, owner=None, interrupt=Non
             if not ready:
                 raise Failure("failed", "guest-unavailable", f"guest environment is unavailable: {detail}; there is no fallback to native execution", {"plan_id": plan_id, "image": image})
             guest_version = detail
+        hosted = record["executor"] == "github"
+        binding = event = None
+        if hosted:
+            from .adapters import host as adapters_host
+            binding = adapters_host.binding(ctx, policy)
+            if binding is None or not policy.get("github"):
+                raise Failure("invalid", "invalid", f"plan {plan_id} names executor github but the trusted policy has no [github] table")
+            if record["environment"] != "native":
+                raise Failure("invalid", "invalid", f"plan {plan_id} names a github gate with environment {record['environment']!r}; github gates require environment native")
+            binding.probe()
+            adapters_host.configure(ctx, binding, policy, plan_row["batch"])
+            event = adapters_host.submission_event(policy, plan_row["batch"], record["gate"], adapters_host.candidate_lanes(c, plan_row))
         run_id = "run-" + secrets.token_hex(16)
         with ctx.store.transaction() as tx:
             tx.execute("INSERT INTO runs(id, plan_id, owner, state, started) VALUES (?, ?, ?, 'running', ?)", (run_id, plan_id, owner, ctx.store.clock()))
@@ -358,7 +427,7 @@ def run(ctx, plan_id, force_fresh=False, timeout=None, owner=None, interrupt=Non
                     break
                 reaped = False
                 try:
-                    outcome, reaped = job.execute(check, position)
+                    outcome, reaped = job.execute_hosted(check, position, binding, event) if hosted else job.execute(check, position)
                     outcome["admission_waited"] = waited
                     results.append(outcome)
                 finally:
@@ -366,12 +435,17 @@ def run(ctx, plan_id, force_fresh=False, timeout=None, owner=None, interrupt=Non
                         job.release(leases)
                     else:
                         leaked.append(check)
-                if outcome["status"] in ("cancelled", "guest-unavailable"):
+                if outcome["status"] in ("cancelled", "guest-unavailable", "host-pending"):
                     break
         except BaseException:
             finish(ctx, run_id, "failed", "runner error")
             raise
         result["unreaped"] = leaked
+        if hosted:
+            result["adapter"] = binding.adapter_record()
+        if any(item["status"] == "host-pending" for item in results):
+            result["note"] = "the host accepted the job but delivered no completion event within the bounded poll; run stays 'running' — 'starlings recover' marks it interrupted and a rerun resubmits the job"
+            return "pending", result
         if job.cancel_reason:
             finish(ctx, run_id, job.cancel_reason, f"run {job.cancel_reason}; no receipt is signed")
             raise Failure("failed", job.cancel_reason, f"run {run_id} was {job.cancel_reason}; no receipt was signed", result)

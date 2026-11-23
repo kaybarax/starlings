@@ -1,0 +1,22 @@
+name: starlings-gate
+
+# Project-owned caller for starlings hosted gates. Triggers are
+# restricted to the configured refs below; the reusable check workflow
+# is pinned by full commit ID (github.reusable_workflow in
+# starlings.toml).
+on:
+  pull_request:
+    branches: [__BRANCHES__]
+  merge_group:
+    branches: [__BRANCHES__]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    uses: __REUSABLE__
+    with:
+      head_sha: ${{ github.sha }}
+      check_id: gate
