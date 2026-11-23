@@ -599,7 +599,7 @@ class MigrationTests(unittest.TestCase):
         fixture.state.mkdir(mode=0o700)
         path = fixture.state / "starlings.db"
         os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
-        added = ("run_processes", "task_candidates", "approvals", "promotions", "include_intents")
+        added = ("run_processes", "task_candidates", "approvals", "promotions", "include_intents", "authorities", "diagnostic_runs")
         verifier_tables = ("trusted_policies", "release_candidates", "plans", "runs", "evidence", "receipts")
         statements = [item.replace("'parked', 'pending', 'included'", "'parked', 'included'") for item in store.SCHEMA.split(";") if item.strip() and not any(f"EXISTS {name}(" in item for name in added)]
         if version == 1:
@@ -625,7 +625,7 @@ class MigrationTests(unittest.TestCase):
                 fixture, path = self.legacy(version)
                 with store.Store(path) as migrated:
                     c = migrated.connection
-                    self.assertEqual(c.execute("SELECT version FROM schema_version").fetchall()[0][0], 3)
+                    self.assertEqual(c.execute("SELECT version FROM schema_version").fetchall()[0][0], store.SCHEMA_VERSION)
                     self.assertEqual([row[0] for row in c.execute("SELECT name FROM tasks ORDER BY seq")], ["one", "two"])
                     c.execute("UPDATE tasks SET state = 'pending' WHERE name = 'one'")
                     self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])

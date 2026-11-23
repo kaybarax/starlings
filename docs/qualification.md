@@ -29,7 +29,7 @@ Each preset's `evidence/index.json` covers all 32 task heads: each retained task
 
 ## Benchmarks
 
-Benchmarks were recorded on this machine — Mac15,9 (Apple M3 Max), 16 CPUs, 48 GiB, macOS 27.2.1 (arm64), Python 3.14.4, Git 2.54.0, starlings 0.1.0 — against the generated fixture's four unittest checks. Cold means a fresh authority, state directory and project per trial; warm means the same authority, state (mirror, database, signer caches) and project with a new batch per trial. Raw ranges are preserved in `bench.json`; per-check command timings are under `trials[].release.run_checks[].metrics.duration_seconds` and admission waits under `run_checks[].admission_waited` (the runner records the wait as a boolean, not a duration). No thresholds are asserted — they remain pending an owner-agreed workload.
+Benchmarks were recorded on an Apple Silicon workstation — 16 CPU cores, 48 GiB RAM, macOS 27 (arm64), Python 3.14, Git 2.54, starlings 0.1.0 — against the generated fixture's four unittest checks. Cold means a fresh authority, state directory and project per trial; warm means the same authority, state (mirror, database, signer caches) and project with a new batch per trial. Raw ranges are preserved in `bench.json`; per-check command timings are under `trials[].release.run_checks[].metrics.duration_seconds` and admission waits under `run_checks[].admission_waited` (the runner records the wait as a boolean, not a duration). No thresholds are asserted — they remain pending an owner-agreed workload.
 
 | Trial | Release gate wall (s) | Outcome |
 |---|---|---|
@@ -45,8 +45,8 @@ At this workload size cold and warm are indistinguishable — the release gate i
 
 | Profile | Status |
 |---|---|
-| Native, macOS 27.2.1 (arm64), Python 3.14.4, Git 2.54.0 | Passes the full suite. |
-| Qualification driver, Mac15,9 (M3 Max, 16 CPUs, 48 GiB), macOS 27.2.1 (arm64), Python 3.14.4, Git 2.54.0 | All four policy presets run end-to-end (4 lanes × 8 tasks) with full traceability; cold/warm release-gate benchmarks and conflict/late-failure trials recorded (this document). |
+| Native, macOS 27 (arm64), Python 3.14, Git 2.54 | Passes the full suite. |
+| Qualification driver, Apple Silicon workstation (16 CPU cores, 48 GiB RAM), macOS 27 (arm64), Python 3.14, Git 2.54 | All four policy presets run end-to-end (4 lanes × 8 tasks) with full traceability; cold/warm release-gate benchmarks and conflict/late-failure trials recorded (this document). |
 | Guest: Colima 0.10.1 (vz, virtiofs, Ubuntu 24.04.4 aarch64), docker client 29.4.3 / server 29.2.1, image `python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e` (official `python:3.13-alpine` index, arm64, Python 3.13.18) | Parity passed: the same passing and failing journey check gives the same outcome, exit code and artifact digest natively and in the guest (`GuestParityTests`). |
 | Any other docker host or image | Not qualified. Unit tests cover the adapter with a fake docker binary. |
 

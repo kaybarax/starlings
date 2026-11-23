@@ -6,7 +6,7 @@ import shutil
 import signal
 import time
 
-from . import gitops
+from . import enforcement, gitops
 from .batches import Failure, check_text, default_owner, finalize, invalid, load_batch, load_lane, refs
 from .contracts import Approval, Promotion
 from .store import LeaseHeld, LeaseLost
@@ -226,7 +226,7 @@ def sources(c, b, plan_row, candidate):
     return reasons, verify, found
 
 
-def promote(ctx, plan_id, receipt_id, owner=None, seconds=600):
+def promote(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected=False):
     owner = owner or default_owner()
     c = ctx.store.connection
     plan_row = load_plan(c, plan_id)
@@ -242,6 +242,7 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600):
     landed = landed_for(c, plan_id, receipt_id)
     if landed is not None:
         return "ok", landed_view(landed, True)
+    hooks = enforcement.hook_guard(c, repository, allow_unprotected)
     lease = acquire(ctx, target_resource(gate, b, target), owner, seconds)
     result = {"plan_id": plan_id, "receipt_id": receipt_id, "batch": b["name"], "gate": gate, "target": target, "repository": repository, "lease_taken_over": lease["taken_over"]}
     info = {"plan": plan_id, "receipt": receipt_id, "target": target, "repository": repository, "old": candidate["base"], "new": candidate["commit"]}
@@ -291,7 +292,7 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600):
             gitops.fetch(Path(repository), Path(b["mirror"]), refs(b["name"])["candidate"](candidate["id"]))
         with ctx.store.transaction() as tx:
             ctx.store.check(tx, lease)
-        applied, detail = gitops.ref_transaction(Path(repository), verify, [(target, new, old)], f"starlings: promote {plan_id} {receipt_id}")
+        applied, detail = gitops.ref_transaction(Path(repository), verify, [(target, new, old)], f"starlings: promote {plan_id} {receipt_id}", hooks=hooks)
         if not applied:
             observed = gitops.resolve(Path(repository), target)
             mark(ctx, None, promotion_id, "not-applied", observed)

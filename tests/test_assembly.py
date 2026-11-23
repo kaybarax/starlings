@@ -10,7 +10,7 @@ from starlings import batches, gitops
 from starlings.cli import main
 from starlings.contracts import Assembly, Candidate
 from starlings.policy import PolicyError, parse, preset, render, validate
-from starlings.store import LeaseHeld, LeaseLost, Store
+from starlings.store import SCHEMA_VERSION, LeaseHeld, LeaseLost, Store
 
 
 class Clock:
@@ -83,7 +83,7 @@ class StoreTests(unittest.TestCase):
             store.release(second)
             self.assertEqual(store.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
             self.assertEqual(store.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-            self.assertEqual(store.connection.execute("SELECT version FROM schema_version").fetchall()[0][0], 3)
+            self.assertEqual(store.connection.execute("SELECT version FROM schema_version").fetchall()[0][0], SCHEMA_VERSION)
         self.assertEqual((fixture.state.stat().st_mode & 0o777), 0o700)
         self.assertEqual(((fixture.state / "starlings.db").stat().st_mode & 0o777), 0o600)
 

@@ -85,7 +85,8 @@ cd <project-dir>
 export STARLINGS_STATE_DIR=<private-state-dir>
 starlings policy trust --authority <authority-path> --commit <policy-sha> --review <review-ref>
 starlings signer init
-starlings doctor
+starlings authority protect --authority <authority-path>   # optional: refuse direct writes to staging/release
+starlings doctor --authority <authority-path>
 ```
 
 Then run a batch:
@@ -128,7 +129,7 @@ A typical split of roles:
 - A **coordinator** prepares the batch, assigns each task to a worker with the repository, batch, lane, task, worktree and policy revision, then assembles and freezes lanes, stages and promotes.
 - A **worker** receives a worktree from `task assign`, commits its change there, and reports the exact commit for `task handoff`; it never plans, runs or promotes.
 
-Starlings enforces its rules only on work that goes through the coordinator. Anyone, or any agent, with direct write access to the authority can bypass every check. Until stronger enforcement lands, tell your agents in your project's instruction files to use starlings for every merge and never to write to lane, staging or release branches directly.
+`starlings authority protect --authority <authority-path>` installs a generated update hook into the authority that refuses writes to the recorded staging and release refs unless they match an intent starlings journaled first — a raw `git push` or `git update-ref` to those branches fails while `stage` and `promote` keep working. This guards against drift and accidents: a same-login agent that deliberately edits, deletes or bypasses the hook can still write the refs directly, so keep telling your agents in your project's instruction files to use starlings for every merge and never to write to lane, staging or release branches directly. `starlings doctor --authority <authority-path>` reports whether the hook is installed, unmodified and recorded.
 
 **Planned:** ready-made instruction templates for specific agent tools, and hosted execution on GitHub Actions.
 
@@ -136,9 +137,10 @@ Starlings enforces its rules only on work that goes through the coordinator. Any
 
 | Group | Commands | Purpose |
 | --- | --- | --- |
-| Setup and policy | `init`, `policy show`, `policy validate`, `policy trust`, `signer init`, `examples init`, `demo`, `doctor` | Create project files, register the policy, manage the signer, run the demo and diagnose the setup. |
+| Setup and policy | `init`, `policy show`, `policy validate`, `policy trust`, `signer init`, `examples init`, `demo`, `authority protect`, `doctor` | Create project files, register the policy, manage the signer, run the demo, harden the authority and diagnose the setup. |
 | Batch, tasks and lanes | `batch prepare`, `task assign`, `task handoff`, `lane assemble`, `lane resolve`, `lane freeze`, `stage`, `status` | Move work from task worktrees into lanes and onto staging. |
 | Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks, and validate the receipt. |
+| Diagnostics | `diagnose` | Rebuild frozen lane subsets of a failed release candidate and re-run the failed checks to name the responsible task or lane pair; results never authorize a promotion. |
 | Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate, and reconcile after an interruption. |
 
 Exit statuses are stable and documented in [docs/policy.md](docs/policy.md). Full options and semantics are in [docs/operations.md](docs/operations.md).
@@ -194,8 +196,8 @@ The signing key is stored unencrypted and is protected only by the state directo
 
 ## Limitations
 
-- **Local only.** The authority must be a local bare repository; remote authorities, hosted execution and deployment are unsupported, and the `github` executor is accepted policy vocabulary but is not implemented.
-- **Coordinator-only enforcement.** Anyone with direct write access to the authority bypasses every check.
+- **Local only.** In v1 the authority must be a local bare repository and every enabled gate must use executor `local`. Remote authorities, hosted execution and deployment are unsupported; `github` is accepted policy vocabulary — including on the task gate — but `policy show`/`validate` warns it is unsupported and `plan` blocks any non-local executor.
+- **Hook-based enforcement only.** `authority protect` refuses unrecorded writes to staging and release refs via a generated authority hook, but a same-login user or agent can still edit or delete the hook, run git with hooks disabled, or use an unprotected authority. It guards drift and accidents, not credentials.
 - **One coordinator machine.** Checks within a run execute one after another; task worktrees are not cleaned up automatically; assembly leases do not supervise processes.
 - **Native checks are trusted.** They run as you and can read the state directory, including the signing key. `memory_mib` and `disk_mib` are recorded, not enforced, and a descendant that calls `setsid`/`setpgid` escapes process-group tracking. Use native execution only for contributors you trust.
 - **Guest checks are not a security boundary.** They run in a pinned Docker container (`--network none`, `name@sha256:` image), qualified on one recorded Colima profile; other docker hosts and images are unqualified.

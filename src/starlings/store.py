@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 import time
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TASKS = """CREATE TABLE IF NOT EXISTS {name}(
     batch TEXT NOT NULL, name TEXT NOT NULL, lane TEXT NOT NULL, owner TEXT NOT NULL, seq INTEGER NOT NULL,
     worktree TEXT NOT NULL, branch TEXT NOT NULL,
@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS promotions(
 CREATE TABLE IF NOT EXISTS include_intents(
     batch TEXT NOT NULL, lane TEXT NOT NULL, task TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, resolution TEXT, created REAL NOT NULL,
     PRIMARY KEY(batch, lane), FOREIGN KEY(batch, task) REFERENCES tasks(batch, name));
+CREATE TABLE IF NOT EXISTS diagnostic_runs(
+    id TEXT PRIMARY KEY, batch TEXT NOT NULL REFERENCES batches(name), plan_id TEXT NOT NULL REFERENCES plans(id),
+    receipt_id TEXT NOT NULL, gate TEXT NOT NULL, position INTEGER NOT NULL,
+    basis TEXT NOT NULL, commit_sha TEXT, ref TEXT, conflict TEXT,
+    checks TEXT NOT NULL, results TEXT NOT NULL, processes TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS authorities(
+    authority TEXT PRIMARY KEY, hook_sha256 TEXT NOT NULL, protected_refs TEXT NOT NULL, installed_at REAL NOT NULL);
 """.format(tasks=TASKS.format(name="tasks"))
 
 
@@ -120,6 +127,8 @@ class Store:
                 c.execute("ALTER TABLE tasks_v3 RENAME TO tasks")
                 if c.execute("PRAGMA foreign_key_check").fetchall():
                     raise ValueError("state database migration found foreign key violations")
+                c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+            elif versions == [3]:
                 c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
             elif versions != [SCHEMA_VERSION]:
                 raise ValueError(f"unsupported state database schema version {versions}")

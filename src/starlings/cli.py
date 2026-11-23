@@ -11,7 +11,7 @@ import tempfile
 import threading
 
 from . import __version__
-from . import batches, demo, examples, gitops, promotion, runner, signer, verifier
+from . import batches, demo, diagnose, enforcement, examples, gitops, promotion, runner, signer, verifier
 from .gitops import GitError
 from .policy import PRESETS, PolicyError, parse, preset, render
 from .state import layout
@@ -69,6 +69,12 @@ def parser():
     promote = commands.add_parser("promote", help="recheck a receipt and land its candidate with one atomic ref transaction")
     promote.add_argument("plan_id")
     promote.add_argument("--receipt", required=True, help="receipt ID issued for the plan")
+    diagnose_cmd = commands.add_parser("diagnose", help="attribute a failed release gate to a task, lane or lane pair over frozen subsets; never produces a receipt")
+    diagnose_cmd.add_argument("batch")
+    diagnose_cmd.add_argument("--gate", required=True, choices=("release",))
+    diagnose_cmd.add_argument("--receipt", required=True, help="failed receipt ID issued for the batch's release plan")
+    diagnose_cmd.add_argument("--plan", help="release plan ID the receipt must belong to")
+    diagnose_cmd.add_argument("--checks", type=lambda value: value.split(","), help="comma-separated plan check IDs to diagnose (default: every check that failed)")
     recover = commands.add_parser("recover", help="reconcile journalled promotions, include intents and lost runs for a batch")
     recover.add_argument("batch")
     recover.add_argument("--resolve", help="ambiguous promotion ID to resolve")
@@ -80,7 +86,16 @@ def parser():
     example_init.add_argument("--with-qualification", action="store_true", help="add the assembly, selection, artifact and exclusive tables used by qualification runs")
     demo = commands.add_parser("demo", help="run a small end-to-end demo in a disposable directory")
     demo.add_argument("--directory", required=True, type=Path, help="disposable directory for the demo; created if absent and must be empty if it exists")
+    authority = commands.add_parser("authority", help="protect a local bare authority with the generated enforcement hook, or evaluate a ref update for the hook").add_subparsers(dest="action", required=True, parser_class=Parser)
+    protect = authority.add_parser("protect", help="install the generated update/reference-transaction hook into a bare authority and record its digest")
+    protect.add_argument("--authority", required=True, type=Path, help="absolute path to a local bare repository")
+    check_intent = authority.add_parser("check-intent", help="hook callback: allow a protected ref update only with a matching journaled intent")
+    check_intent.add_argument("refname")
+    check_intent.add_argument("old")
+    check_intent.add_argument("new")
+    check_intent.add_argument("--authority", required=True, type=Path, help="absolute path to the bare authority being updated")
     doctor = commands.add_parser("doctor", help="read-only diagnostics; does not certify enforcement")
+    doctor.add_argument("--authority", type=Path, help="absolute path to a local bare authority to probe for hook enforcement")
     doctor.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR); inspected, never created")
     batch = commands.add_parser("batch", help="prepare a batch against a local bare authority").add_subparsers(dest="action", required=True, parser_class=Parser)
     prepare = batch.add_parser("prepare", help="pin the staging base, lane order and untrusted policy digest")
@@ -117,18 +132,20 @@ def parser():
     stage.add_argument("--review", help="review reference for --resolution")
     status = commands.add_parser("status", help="show batch, task, lane and candidate state")
     status.add_argument("batch")
-    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy):
+    for command in (stage, promote):
+        command.add_argument("--allow-unprotected", action="store_true", help="proceed even when a recorded hook-protected authority is missing or has a modified enforcement hook")
+    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy, diagnose_cmd, protect):
         command.add_argument("--owner", help="lease owner label (default host:pid)")
         command.add_argument("--lease-seconds", type=int, default=600)
-    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover):
+    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent):
         command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR)")
-    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover):
+    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect):
         command.add_argument("--directory", type=Path, default=Path.cwd(), help="existing project directory")
     return result
 
 
 def batch_command(args):
-    with batches.Context(args.state_dir, args.directory, create=args.command not in ("status", "check", "cancel", "approve", "revoke", "promote", "recover")) as ctx:
+    with batches.Context(args.state_dir, args.directory, create=args.command not in ("status", "check", "cancel", "approve", "revoke", "promote", "recover", "diagnose")) as ctx:
         if args.command == "policy":
             for name in ("authority", "commit", "review"):
                 if getattr(args, name) is None:
@@ -157,9 +174,13 @@ def batch_command(args):
         if args.command == "revoke":
             return promotion.revoke(ctx, args.approval_id, args.owner, args.lease_seconds)
         if args.command == "promote":
-            return promotion.promote(ctx, args.plan_id, args.receipt, args.owner, args.lease_seconds)
+            return promotion.promote(ctx, args.plan_id, args.receipt, args.owner, args.lease_seconds, args.allow_unprotected)
         if args.command == "recover":
             return promotion.recover(ctx, args.batch, args.resolve, args.outcome, args.owner, args.lease_seconds)
+        if args.command == "diagnose":
+            return diagnose.diagnose(ctx, args.batch, args.gate, args.receipt, args.plan, args.checks, args.owner, args.lease_seconds)
+        if args.command == "authority":
+            return enforcement.protect(ctx, args.authority, args.owner, args.lease_seconds)
         if args.command == "batch":
             return batches.prepare(ctx, args.batch, args.lanes, args.authority)
         if args.command == "task" and args.action == "assign":
@@ -173,7 +194,7 @@ def batch_command(args):
         if args.command == "lane":
             return batches.freeze(ctx, args.batch, args.lane, args.owner, args.lease_seconds)
         if args.command == "stage":
-            return batches.stage(ctx, args.batch, args.lanes, args.owner, args.lease_seconds, args.resolution, args.review)
+            return batches.stage(ctx, args.batch, args.lanes, args.owner, args.lease_seconds, args.resolution, args.review, args.allow_unprotected)
         return batches.status(ctx, args.batch)
 
 
@@ -192,7 +213,7 @@ def exclusive_write(path, content):
 
 
 def warnings(policy):
-    result = ["Only starlings promote advances staging or release, after a complete recheck of a passed receipt; deployment is out of scope. Enforcement is coordinator-only: a direct writer to the authority bypasses Starlings."]
+    result = ["Only starlings promote advances staging or release, after a complete recheck of a passed receipt; deployment is out of scope. On an authority hardened with `starlings authority protect`, direct writes to the recorded staging and release refs are refused by a generated update hook; the hook guards against drift and accidents, not credential separation — anyone who can edit or disable the hook still bypasses it."]
     for name, gate in policy["gates"].items():
         if gate["scope"] == "none":
             continue
@@ -210,7 +231,9 @@ def perform(args, json_output=False):
         return examples.init(args.target, args.preset, args.with_qualification)
     if args.command == "demo":
         return demo.run(args.directory, json_output)
-    if args.command in ("batch", "task", "lane", "stage", "status", "signer", "plan", "run", "cancel", "check", "approve", "revoke", "promote", "recover") or (args.command == "policy" and args.action == "trust"):
+    if args.command == "authority" and args.action == "check-intent":
+        return enforcement.check_intent(args.state_dir, args.authority, args.refname, args.old, args.new)
+    if args.command in ("batch", "task", "lane", "stage", "status", "signer", "plan", "run", "cancel", "check", "approve", "revoke", "promote", "recover", "diagnose", "authority") or (args.command == "policy" and args.action == "trust"):
         return batch_command(args)
     root = args.directory.resolve(strict=True)
     if not root.is_dir():
@@ -227,7 +250,8 @@ def perform(args, json_output=False):
         return {"valid": True, "path": str(manifest), "policy": policy, "warnings": warnings(policy)}
     state = layout(root, args.state_dir)
     policy = parse(manifest.read_text(encoding="utf-8")) if manifest.exists() else None
-    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": "local-bare", "authority_configured": False, "enforcement_implemented": False, "signing_implemented": True, "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
+    hook = enforcement.probe(args.state_dir, args.authority)
+    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
 
 
 def probe(function):

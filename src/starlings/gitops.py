@@ -3,7 +3,8 @@ import re
 import subprocess
 
 MINIMUM = (2, 38)
-CONFIG = ("-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always")
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+CONFIG = NO_HOOKS + ("-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always")
 IDENTITY = ("starlings", "starlings@localhost")
 
 
@@ -23,8 +24,8 @@ def environment(date=None):
     return env
 
 
-def git(repository, *args, ok=(0,), date=None, text=True, input=None):
-    argv = ["git", *CONFIG, *(("-C", str(repository)) if repository is not None else ()), *args]
+def git(repository, *args, ok=(0,), date=None, text=True, input=None, hooks=False):
+    argv = ["git", *(CONFIG if not hooks else CONFIG[len(NO_HOOKS):]), *(("-C", str(repository)) if repository is not None else ()), *args]
     result = subprocess.run(argv, capture_output=True, text=text, env=environment(date), input=input, stdin=subprocess.DEVNULL if input is None else None, check=False)
     if result.returncode not in ok:
         raise GitError(list(args), result.returncode, result.stderr if text else result.stderr.decode("utf-8", "replace"))
@@ -67,17 +68,17 @@ def is_ancestor(repository, ancestor, descendant):
     return git(repository, "merge-base", "--is-ancestor", ancestor, descendant, ok=(0, 1)).returncode == 0
 
 
-def update_ref(repository, ref, new, old, message="starlings"):
-    result = git(repository, "update-ref", "-m", message, ref, new, old, ok=(0, 1, 128))
+def update_ref(repository, ref, new, old, message="starlings", hooks=False):
+    result = git(repository, "update-ref", "-m", message, ref, new, old, ok=(0, 1, 128), hooks=hooks)
     return result.returncode == 0
 
 
-def ref_transaction(repository, verify, update, message="starlings"):
+def ref_transaction(repository, verify, update, message="starlings", hooks=False):
     lines = ["start"]
     lines += [f"verify {ref} {sha}" for ref, sha in verify]
     lines += [f"update {ref} {new} {old}" for ref, new, old in update]
     lines += ["prepare", "commit"]
-    result = git(repository, "update-ref", "-m", message, "--stdin", input="\n".join(lines) + "\n", ok=(0, 1, 128))
+    result = git(repository, "update-ref", "-m", message, "--stdin", input="\n".join(lines) + "\n", ok=(0, 1, 128), hooks=hooks)
     return result.returncode == 0, result.stderr.strip()
 
 

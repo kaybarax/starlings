@@ -239,8 +239,7 @@ class Run:
                 process = None
                 status, code = "failed", 127
             if process is not None:
-                with self.ctx.store.transaction() as c:
-                    c.execute("INSERT OR REPLACE INTO run_processes(run_id, check_id, pgid, job, worktree) VALUES (?, ?, ?, ?, ?)", (self.run_id, check, process.pid, str(job), str(worktree)))
+                self.record_process(check, process, job, worktree)
                 self.ctx.hook("process-started", {"run": self.run_id, "check": check, "pid": process.pid, "worktree": str(worktree)})
                 deadline = started + self.timeout
                 stop = None
@@ -287,11 +286,18 @@ class Run:
         removal = gitops.git(self.mirror, "worktree", "remove", "--force", str(worktree), ok=(0, 128))
         metrics["worktree_removed"] = removal.returncode == 0
         shutil.rmtree(job, ignore_errors=True)
+        self.record_evidence(check, position, evidence, status, manifest, metrics, reaped)
+        return {"check": check, "status": status, "exit_code": evidence.exit_code, "evidence_id": evidence.id, "files": manifest, "metrics": metrics}, reaped
+
+    def record_process(self, check, process, job, worktree):
+        with self.ctx.store.transaction() as c:
+            c.execute("INSERT OR REPLACE INTO run_processes(run_id, check_id, pgid, job, worktree) VALUES (?, ?, ?, ?, ?)", (self.run_id, check, process.pid, str(job), str(worktree)))
+
+    def record_evidence(self, check, position, evidence, status, manifest, metrics, reaped):
         with self.ctx.store.transaction() as c:
             if reaped:
                 c.execute("DELETE FROM run_processes WHERE run_id = ? AND check_id = ?", (self.run_id, check))
             c.execute("INSERT INTO evidence(run_id, check_id, position, evidence_id, status, exit_code, record, files, metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (self.run_id, check, position, evidence.id, status, evidence.exit_code, json.dumps(evidence.to_dict(), sort_keys=True), json.dumps(manifest, sort_keys=True), json.dumps(metrics, sort_keys=True)))
-        return {"check": check, "status": status, "exit_code": evidence.exit_code, "evidence_id": evidence.id, "files": manifest, "metrics": metrics}, reaped
 
 
 def toolchain(image):

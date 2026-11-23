@@ -5,3 +5,10 @@ build/
 dist/
 *.egg-info/
 AGENTS.local.md
+.ruff_cache/
+.starlings-*
+.DS_Store
+*.log
+bench.json
+index.json
+evidence/

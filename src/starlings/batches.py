@@ -672,7 +672,7 @@ def apply_resolution(ctx, b, old, tips, names, resolution, review, result):
     return gitops.commit_tree(mirror, tree, (old, *tips), message, b["created"]), tree
 
 
-def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=None):
+def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=None, allow_unprotected=False):
     owner = owner or default_owner()
     c = ctx.store.connection
     b = load_batch(c, batch)
@@ -695,6 +695,8 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
     policy = json.loads(b["policy"])
     gate = policy["gates"]["staging"]
     target = f"refs/heads/{b['staging']}"
+    from . import enforcement
+    hooks = enforcement.hook_guard(c, str(authority), allow_unprotected)
     try:
         lease = ctx.store.acquire(f"target:{authority}:{target}", owner, seconds)
     except LeaseHeld as exc:
@@ -776,7 +778,7 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
             with ctx.store.transaction() as tx:
                 ctx.store.check(tx, lease)
             gitops.fetch(authority, mirror, candidate_ref)
-            if not gitops.update_ref(authority, target, commit, old, f"starlings: stage {candidate.id}"):
+            if not gitops.update_ref(authority, target, commit, old, f"starlings: stage {candidate.id}", hooks=hooks):
                 with ctx.store.transaction() as tx:
                     tx.execute("UPDATE candidates SET state = 'stale' WHERE id = ? AND state = 'prepared'", (candidate.id,))
                 entry["state"] = "stale"
