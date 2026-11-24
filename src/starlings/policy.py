@@ -7,6 +7,7 @@ PRESETS = ("release-only", "combined-lanes-release", "each-lane-release", "every
 RESOURCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
 REUSABLE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
+UPSTREAM = re.compile(r"(/|file:///|https://|ssh://)\S+|([A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*:\S+")
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORKFLOW = re.compile(r"\.github/workflows/[a-zA-Z0-9][a-zA-Z0-9._-]*\.(yml|yaml)")
 
@@ -51,8 +52,18 @@ def validate(data):
         require(not value.startswith(("-", "/", ".")) and not value.endswith(("/", ".")) and not any(x in value for x in ("..", "@{", "//")) and not re.search(r"[\s~^:?*\[\\]", value) and all(not x.endswith(".lock") and not x.startswith(".") for x in value.split("/")) and value != "@", key, "expected a valid Git branch name, for example dev or main")
     require(data["staging"] != data["release"], "release", "must differ from staging")
     require(type(data["fully_verified_release"]) is bool, "fully_verified_release", "expected a boolean")
-    table(data["authority"], "authority", ("mode",))
-    choice(data["authority"]["mode"], "authority.mode", ("local-bare",))
+    table(data["authority"], "authority", ("mode",), ("upstream", "publish_staging"))
+    choice(data["authority"]["mode"], "authority.mode", ("local-bare", "mirror"))
+    if data["authority"]["mode"] == "mirror":
+        require("upstream" in data["authority"], "authority.upstream", "required when authority.mode is mirror")
+        upstream = data["authority"]["upstream"]
+        text(upstream, "authority.upstream")
+        require(bool(UPSTREAM.fullmatch(upstream)) and "::" not in upstream and ("://" not in upstream or upstream.startswith(("file:///", "https://", "ssh://"))), "authority.upstream", "expected an absolute path, a file://, https:// or ssh:// URL, or host:path, without whitespace")
+        require(not re.match(r"https://[^/]*@", upstream) and not re.match(r"[a-z]+://[^/@]*:[^/@]*@", upstream), "authority.upstream", "must not embed credentials; use a credential helper or an SSH key")
+        if "publish_staging" in data["authority"]:
+            require(type(data["authority"]["publish_staging"]) is bool, "authority.publish_staging", "expected a boolean")
+    else:
+        require(set(data["authority"]) == {"mode"}, "authority", "upstream and publish_staging apply only to mode mirror")
     if "assembly" in data:
         table(data["assembly"], "assembly", (), ("excluded",))
         if "excluded" in data["assembly"]:

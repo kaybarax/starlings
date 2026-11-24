@@ -236,7 +236,8 @@ Workers can come from one harness or several. Tell your agents in your project's
 | Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks and validate the receipt. |
 | Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate and reconcile after an interruption. |
 | Diagnostics | `diagnose` | Find the task or lane responsible for a failed release gate. Results never authorize a promotion. |
-| Publishing | `templates github` | Preview or write the GitHub workflow templates used by the GitHub executor. |
+| Mirror authority | `authority sync`, `authority publish`, `authority discard` | Follow an upstream repository, publish a verified release to it in one atomic push, and set aside a promotion that can no longer be published. |
+| Templates | `templates github` | Preview or write the GitHub workflow templates used by the GitHub executor. |
 
 Run `starlings <command> --help` for options. Exit statuses are listed in [docs/policy.md](docs/policy.md#output-and-exit-statuses), and full command semantics are in [docs/operations.md](docs/operations.md).
 
@@ -248,7 +249,7 @@ This executor is implemented but has not yet been tested end to end against GitH
 
 ## Limitations
 
-- **Local authority only.** The authority must be a local bare Git repository. Remote authorities and deployment are out of scope.
+- **Local authority only.** The authority is always a local bare Git repository. A mirror authority can follow a remote and publish verified releases to it, but the remote is never the authority. Deployment is out of scope.
 - **One coordinator machine.** All CI runs on the machine that holds the state directory. Checks within one run execute one after another (separate runs share the configured slots), and task worktrees are not cleaned up automatically.
 - **Hook protection is not access control.** `authority protect` refuses unrecorded writes to staging and release, but anyone with the same login can edit or bypass the hook.
 - **Native checks are trusted.** They run as your user and can read the state directory, including the signing key. Memory and disk limits are recorded, not enforced. Use native checks only for agent work you trust to run as you.

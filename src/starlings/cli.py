@@ -11,7 +11,7 @@ import tempfile
 import threading
 
 from . import __version__
-from . import batches, demo, diagnose, enforcement, examples, gitops, promotion, runner, signer, verifier
+from . import batches, demo, diagnose, enforcement, examples, gitops, promotion, runner, signer, upstream, verifier
 from .adapters import host as adapters_host
 from .adapters import templates as adapters_templates
 from .gitops import GitError
@@ -93,7 +93,13 @@ def parser():
     writes = templates_github.add_mutually_exclusive_group()
     writes.add_argument("--preview", action="store_true", help="preview only (default)")
     writes.add_argument("--write", action="store_true", help="write the workflow files; never replace existing files")
-    authority = commands.add_parser("authority", help="protect a local bare authority with the generated enforcement hook, or evaluate a ref update for the hook").add_subparsers(dest="action", required=True, parser_class=Parser)
+    authority = commands.add_parser("authority", help="protect a local bare authority with the generated enforcement hook, evaluate a ref update for the hook, or follow and publish to the upstream of a mirror authority").add_subparsers(dest="action", required=True, parser_class=Parser)
+    sync = authority.add_parser("sync", help="mirror authority: bring the upstream staging and release heads into the bare authority; refuses when the authority is ahead")
+    publish = authority.add_parser("publish", help="mirror authority: push the landed, verified release to the upstream in one atomic, non-forced push")
+    discard = authority.add_parser("discard", help="mirror authority: set an unpublished promotion aside under refs/discarded/ and follow the upstream again")
+    discard.add_argument("--force", action="store_true", help="also set aside a valid, publishable promotion of the current upstream heads")
+    for command in (sync, publish, discard):
+        command.add_argument("--authority", type=Path, help="absolute path to the local bare authority (default: authority.git in the state directory)")
     protect = authority.add_parser("protect", help="install the generated update/reference-transaction hook into a bare authority and record its digest")
     protect.add_argument("--authority", required=True, type=Path, help="absolute path to a local bare repository")
     check_intent = authority.add_parser("check-intent", help="hook callback: allow a protected ref update only with a matching journaled intent")
@@ -141,12 +147,12 @@ def parser():
     status.add_argument("batch")
     for command in (stage, promote):
         command.add_argument("--allow-unprotected", action="store_true", help="proceed even when a recorded hook-protected authority is missing or has a modified enforcement hook")
-    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy, diagnose_cmd, protect):
+    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy, diagnose_cmd, protect, sync, publish, discard):
         command.add_argument("--owner", help="lease owner label (default host:pid)")
         command.add_argument("--lease-seconds", type=int, default=600)
-    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent):
+    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent, sync, publish, discard):
         command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR)")
-    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github):
+    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github, sync, publish, discard):
         command.add_argument("--directory", type=Path, default=Path.cwd(), help="existing project directory")
     return result
 
@@ -186,6 +192,12 @@ def batch_command(args):
             return promotion.recover(ctx, args.batch, args.resolve, args.outcome, args.owner, args.lease_seconds)
         if args.command == "diagnose":
             return diagnose.diagnose(ctx, args.batch, args.gate, args.receipt, args.plan, args.checks, args.owner, args.lease_seconds)
+        if args.command == "authority" and args.action == "sync":
+            return upstream.sync(ctx, args.authority, args.owner, args.lease_seconds)
+        if args.command == "authority" and args.action == "publish":
+            return upstream.publish(ctx, args.authority, args.owner, args.lease_seconds)
+        if args.command == "authority" and args.action == "discard":
+            return upstream.discard(ctx, args.authority, args.force, args.owner, args.lease_seconds)
         if args.command == "authority":
             return enforcement.protect(ctx, args.authority, args.owner, args.lease_seconds)
         if args.command == "batch":
@@ -282,7 +294,7 @@ def perform(args, json_output=False):
     state = layout(root, args.state_dir)
     policy = parse(manifest.read_text(encoding="utf-8")) if manifest.exists() else None
     hook = enforcement.probe(args.state_dir, args.authority)
-    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "adapters": adapters_host.probe(state["root"], policy), "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
+    return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": policy["authority"]["mode"] if policy is not None else "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "adapters": adapters_host.probe(state["root"], policy), "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
 
 
 def probe(function):
