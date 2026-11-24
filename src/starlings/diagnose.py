@@ -107,7 +107,7 @@ class Diagnosis:
             tx.execute("INSERT INTO diagnostic_runs(id, batch, plan_id, receipt_id, gate, position, basis, commit_sha, ref, conflict, checks, results, processes, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (entry["id"], self.b["name"], self.plan_row["id"], self.receipt_id, "release", entry["position"], json.dumps(entry["basis"], sort_keys=True), entry["commit"], entry["ref"], json.dumps(entry["conflict"], sort_keys=True) if entry["conflict"] else None, json.dumps(self.checks), "[]", "[]", self.ctx.store.clock()))
         if entry["conflict"] is not None:
             return entry
-        shim = {"record": self.plan_row["record"], "policy": self.plan_row["policy"], "candidate": json.dumps({"id": entry["id"], "commit": entry["commit"]}), "batch": self.b["name"]}
+        shim = {"record": self.plan_row["record"], "policy": self.plan_row["policy"], "candidate": json.dumps({"id": entry["id"], "commit": entry["commit"], "tree": entry["tree"], "base": self.baseline, "target": self.candidate["target"]}), "batch": self.b["name"]}
         job = SubsetRun(self.ctx, shim, entry["id"], self.owner, self.timeout)
         for position, check in enumerate(self.checks):
             leases, waited = job.admit(check)

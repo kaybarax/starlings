@@ -127,6 +127,8 @@ def validate(data):
         for key in ("reusable_workflow", "workflow"):
             require(key in data["github"], f"github.{key}", "required when an enabled gate uses executor github")
         require(data["gates"][name].get("environment") == "native", f"gates.{name}.environment", "github gates require environment native in v1")
+        for check in data["gates"][name].get("checks", []):
+            require(not any("{context}" in arg for arg in checks[check]), f"checks.{check}", "the {context} placeholder is available to local checks only; a github gate cannot use it")
     return data
 
 

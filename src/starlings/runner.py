@@ -111,6 +111,15 @@ def candidate_environment(job):
     return env
 
 
+def expand(argv, values):
+    result = []
+    for arg in argv:
+        for key, value in values.items():
+            arg = arg.replace("{" + key + "}", value)
+        result.append(arg)
+    return result
+
+
 def create_private(path):
     return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
 
@@ -210,20 +219,44 @@ class Run:
                 released = False
         return released
 
+    def values(self):
+        return {"base": self.candidate.get("base") or self.candidate["commit"], "head": self.candidate["commit"]}
+
+    def context(self, check):
+        c = self.ctx.store.connection
+        plan_id = self.record["id"]
+        rows = c.execute("SELECT * FROM approvals WHERE plan_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY id", (plan_id, self.ctx.store.clock())).fetchall()
+        approvals = [{"id": row["id"], "by": row["by_identity"], "review": row["review"], "granted_at": row["granted_at"], "expires_at": row["expires_at"]} for row in rows]
+        candidate = {key: self.candidate.get(key) for key in ("id", "commit", "tree", "parents", "target")}
+        return {"schema": 1, "kind": "check-context", "plan_id": plan_id, "run_id": self.run_id, "check": check, "gate": self.record["gate"], "batch": self.plan_row["batch"], **self.values(), "candidate": candidate, "approvals": approvals}
+
     def execute(self, check, position):
-        argv = list(self.policy["checks"][check])
+        template = list(self.policy["checks"][check])
         worktree = private_dir(self.ctx.root, "worktrees", "runs", self.run_id) / check
         gitops.git(self.mirror, "worktree", "add", "--quiet", "--detach", str(worktree), self.candidate["commit"])
         job = Path(tempfile.mkdtemp(prefix="starlings-job-"))
         logs = private_dir(self.ctx.root, "logs", self.run_id)
         out_path, err_path = logs / f"{check}.out", logs / f"{check}.err"
+        values = self.values()
+        context_path = None
+        if any("{context}" in arg for arg in template):
+            context_path = logs / f"{check}.context.json"
+            content = json.dumps(self.context(check), sort_keys=True, indent=2) + "\n"
+            for target in (context_path, *(() if self.guest else (job / "starlings-context.json",))):
+                with os.fdopen(create_private(target), "w", encoding="utf-8") as stream:
+                    stream.write(content)
+            values["context"] = "/starlings/context.json" if self.guest else str(job / "starlings-context.json")
+        argv = expand(template, values)
         name = f"starlings-{self.run_id.removeprefix('run-')}-{check}"
         metrics = {"environment": self.record["environment"], "timeout_seconds": self.timeout, "memory_mib_budget": self.limits["memory_mib"], "disk_mib_budget": self.limits["disk_mib"], "memory_enforced": False, "disk_enforced": False}
         if self.guest:
             if "," in str(worktree):
                 raise Failure("failed", "guest-unavailable", f"checkout path {worktree} cannot be bind-mounted")
             memory = max(6, self.limits["memory_mib"] // max(1, self.limits["max_guests"]))
-            argv = [docker_binary() or "docker", "run", "--rm", "--pull", "never", "--network", "none", "--cpus", "1", "--memory", f"{memory}m", "--mount", f"type=bind,source={worktree},target=/work", "-w", "/work", "--name", name, self.policy["guest"]["image"], *argv]
+            mounts = ["--mount", f"type=bind,source={worktree},target=/work"]
+            if context_path is not None:
+                mounts += ["--mount", f"type=bind,source={context_path},target=/starlings/context.json,readonly"]
+            argv = [docker_binary() or "docker", "run", "--rm", "--pull", "never", "--network", "none", "--cpus", "1", "--memory", f"{memory}m", *mounts, "-w", "/work", "--name", name, self.policy["guest"]["image"], *argv]
             metrics.update({"container": name, "guest_memory_mib": memory, "memory_enforced": True})
             env = dict(os.environ)
             for key in [key for key in env if key.startswith(("GIT_", "STARLINGS_"))]:
@@ -275,6 +308,8 @@ class Run:
                         status = "guest-unavailable"
         metrics.update({"duration_seconds": round(time.monotonic() - started, 3), "peak_child_rss_bytes_high_water": peak_rss(), "checkout_disk_bytes": disk_usage(worktree), "process_group_reaped": reaped})
         files = {f"logs/{self.run_id}/{check}.out": None, f"logs/{self.run_id}/{check}.err": None}
+        if context_path is not None:
+            files[f"logs/{self.run_id}/{check}.context.json"] = None
         missing = []
         if status not in ("cancelled", "guest-unavailable"):
             artifacts, missing = collect(self.ctx, self.run_id, check, worktree, self.policy.get("artifacts", {}).get(check, []))
@@ -306,7 +341,7 @@ class Run:
     def execute_hosted(self, check, position, binding, event):
         config = self.policy["github"]
         required = list(self.policy.get("artifacts", {}).get(check, []))
-        submission = binding.submit_job(self.candidate["repository"], check, config["workflow"], config["reusable_workflow"], self.candidate["commit"], event, {"argv": list(self.policy["checks"][check]), "artifacts": required, "timeout": self.timeout, "objects": str(self.mirror), "run_id": self.run_id, "plan_id": self.plan_row["id"], "candidate_id": self.candidate["id"]})
+        submission = binding.submit_job(self.candidate["repository"], check, config["workflow"], config["reusable_workflow"], self.candidate["commit"], event, {"argv": expand(self.policy["checks"][check], self.values()), "artifacts": required, "timeout": self.timeout, "objects": str(self.mirror), "run_id": self.run_id, "plan_id": self.plan_row["id"], "candidate_id": self.candidate["id"]})
         metrics = {"environment": "native", "executor": "github", "timeout_seconds": self.timeout, "hosted": True, "host": submission}
         self.ctx.hook("host-submitted", {"run": self.run_id, "check": check, "host_run": submission["run_id"], "attempt": submission["attempt"]})
         deadline, completion = time.monotonic() + self.timeout, None
