@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import test_verifier as tv
 from starlings import promotion
@@ -60,6 +61,48 @@ class PlaceholderTests(tv.VerifierCase):
         policy["checks"]["example"].append("{context}")
         with self.assertRaisesRegex(PolicyError, "local checks only"):
             validate(policy)
+
+
+class EnvironmentTests(tv.VerifierCase):
+    def environ(self, settings, operator):
+        policy = parse(tv.build_policy({"environ": ["python3", "-c", tv.ENVIRON]}, scope="full", artifacts={"environ": ["out/env.json"]}))
+        if settings is not None:
+            policy["environment"] = settings
+        fixture = self.make(render(policy))
+        home = fixture.root / "operator-home"
+        home.mkdir()
+        with patch.dict("os.environ", {"HOME": str(home), **operator}):
+            self.ready(fixture)
+            self.stage(fixture, {"journeys/onboarding.txt": "welcome back\n"})
+            run = self.run_plan(fixture, self.plan(fixture)["plan_id"])
+        seen = json.loads((fixture.state / "artifacts" / run["run_id"] / "environ" / "out" / "env.json").read_text())
+        return home, seen, run["checks"][0]["metrics"]
+
+    def test_default_is_isolated_and_passes_nothing(self):
+        home, seen, metrics = self.environ(None, {"SAMPLE_TOKEN": "value"})
+        self.assertEqual(seen["HOME"], seen["TMPDIR"])
+        self.assertNotEqual(seen["HOME"], str(home))
+        self.assertNotIn("SAMPLE_TOKEN", seen)
+        self.assertEqual((metrics["home"], metrics["env_passed"], metrics["env_missing"]), ("isolated", [], []))
+
+    def test_operator_home_and_passed_variables(self):
+        home, seen, metrics = self.environ({"home": "operator", "pass": ["SAMPLE_TOKEN", "SAMPLE_ABSENT"]}, {"SAMPLE_TOKEN": "value", "SAMPLE_OTHER": "hidden", "STARLINGS_STATE_DIR": "/nowhere"})
+        self.assertEqual(seen["HOME"], str(home))
+        self.assertNotEqual(seen["TMPDIR"], str(home))
+        self.assertEqual(seen["SAMPLE_TOKEN"], "value")
+        self.assertFalse({"SAMPLE_OTHER", "SAMPLE_ABSENT", "STARLINGS_STATE_DIR"} & set(seen))
+        self.assertEqual((metrics["home"], metrics["env_passed"], metrics["env_missing"]), ("operator", ["SAMPLE_TOKEN"], ["SAMPLE_ABSENT"]))
+        self.assertNotIn("value", json.dumps(metrics))
+
+    def test_policy_validation_and_roundtrip(self):
+        policy = preset("release-only")
+        policy["environment"] = {"home": "operator", "pass": ["SAMPLE_TOKEN"]}
+        self.assertEqual(parse(render(policy))["environment"], policy["environment"])
+        for settings in ({"home": "shared"}, {"pass": ["GIT_DIR"]}, {"pass": ["STARLINGS_STATE_DIR"]}, {"pass": ["HOME"]}, {"pass": ["not a name"]}, {"pass": "SAMPLE_TOKEN"}, {"other": 1}):
+            with self.subTest(settings=settings), self.assertRaises(PolicyError):
+                validate({**policy, "environment": settings})
+        from starlings.cli import warnings
+        self.assertEqual(len([line for line in warnings(policy) if line.startswith("environment:")]), 2)
 
 
 if __name__ == "__main__":

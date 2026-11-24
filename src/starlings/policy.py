@@ -7,6 +7,7 @@ PRESETS = ("release-only", "combined-lanes-release", "each-lane-release", "every
 RESOURCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
 REUSABLE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
+VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORKFLOW = re.compile(r"\.github/workflows/[a-zA-Z0-9][a-zA-Z0-9._-]*\.(yml|yaml)")
 
 
@@ -41,7 +42,7 @@ def strings(value, path, nonempty=True):
 
 
 def validate(data):
-    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github"))
+    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github", "environment"))
     require(type(data["schema"]) is int and data["schema"] == 1, "schema", "only integer schema version 1 is supported")
     text(data["project"], "project")
     for key in ("staging", "release"):
@@ -121,6 +122,14 @@ def validate(data):
             require(type(data["github"]["reusable_workflow"]) is str and bool(REUSABLE.fullmatch(data["github"]["reusable_workflow"])), "github.reusable_workflow", "expected a reusable workflow reference pinned as path@<40 lowercase hex>")
         if "workflow" in data["github"]:
             require(type(data["github"]["workflow"]) is str and bool(WORKFLOW.fullmatch(data["github"]["workflow"])), "github.workflow", "expected a project caller workflow path .github/workflows/<name>.yml or .yaml")
+    if "environment" in data:
+        table(data["environment"], "environment", (), ("home", "pass"))
+        if "home" in data["environment"]:
+            choice(data["environment"]["home"], "environment.home", ("isolated", "operator"))
+        if "pass" in data["environment"]:
+            strings(data["environment"]["pass"], "environment.pass", False)
+            for i, name in enumerate(data["environment"]["pass"]):
+                require(bool(VARIABLE.fullmatch(name)) and not name.startswith(("GIT_", "STARLINGS_")) and name not in ("HOME", "TMPDIR", "PATH", "LANG", "LC_ALL"), f"environment.pass[{i}]", "expected an environment variable name; GIT_*, STARLINGS_* and the variables Starlings sets itself (HOME, TMPDIR, PATH, LANG, LC_ALL) cannot be passed")
     hosted = [name for name, gate in data["gates"].items() if gate["scope"] != "none" and gate.get("executor") == "github"]
     for name in hosted:
         require("github" in data, "github", "required when an enabled gate uses executor github")
@@ -165,7 +174,7 @@ def render(data):
     def value(item):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
     lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release")]
-    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github") if section in data), ("limits", data["limits"])]:
+    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github", "environment") if section in data), ("limits", data["limits"])]:
         lines.extend(["", f"[{section}]"])
         lines.extend(f"{key} = {value(item)}" for key, item in entries.items())
     return "\n".join(lines) + "\n"

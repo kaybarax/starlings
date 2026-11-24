@@ -104,10 +104,16 @@ def stop_container(name):
     return container_gone(name)
 
 
-def candidate_environment(job):
+def candidate_environment(job, settings=None):
+    settings = settings or {}
     env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(job), "TMPDIR": str(job)}
+    if settings.get("home") == "operator":
+        env["HOME"] = os.environ.get("HOME") or str(Path.home())
     for key in ("LANG", "LC_ALL"):
         env[key] = os.environ.get(key, "C")
+    for name in settings.get("pass", []):
+        if name in os.environ:
+            env[name] = os.environ[name]
     return env
 
 
@@ -262,7 +268,9 @@ class Run:
             for key in [key for key in env if key.startswith(("GIT_", "STARLINGS_"))]:
                 env.pop(key)
         else:
-            env = candidate_environment(job)
+            settings = self.policy.get("environment") or {}
+            env = candidate_environment(job, settings)
+            metrics.update({"home": settings.get("home", "isolated"), "env_passed": [name for name in settings.get("pass", []) if name in env], "env_missing": [name for name in settings.get("pass", []) if name not in env]})
         status, code, reaped = "passed", 0, True
         started = time.monotonic()
         with os.fdopen(create_private(out_path), "wb") as out, os.fdopen(create_private(err_path), "wb") as err:

@@ -221,6 +221,11 @@ def exclusive_write(path, content):
 
 def warnings(policy):
     result = ["Only starlings promote advances staging or release, after a complete recheck of a passed receipt; deployment is out of scope. On an authority hardened with `starlings authority protect`, direct writes to the recorded staging and release refs are refused by a generated update hook; the hook guards against drift and accidents, not credential separation — anyone who can edit or disable the hook still bypasses it."]
+    settings = policy.get("environment") or {}
+    if settings.get("home") == "operator":
+        result.append("environment: native checks run with the operator's HOME, so they can read and change everything under it — credentials, tool configuration and caches. Use it only for checks you would run by hand as yourself.")
+    if settings.get("pass"):
+        result.append(f"environment: native checks receive the operator's values of {', '.join(settings['pass'])}; a check can print or send them, and retained logs may contain them.")
     for name, gate in policy["gates"].items():
         if gate["scope"] == "none":
             continue
