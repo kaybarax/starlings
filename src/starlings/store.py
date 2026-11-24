@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 import time
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 TASKS = """CREATE TABLE IF NOT EXISTS {name}(
     batch TEXT NOT NULL, name TEXT NOT NULL, lane TEXT NOT NULL, owner TEXT NOT NULL, seq INTEGER NOT NULL,
     worktree TEXT NOT NULL, branch TEXT NOT NULL,
@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS dispositions(
     batch TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, repo TEXT NOT NULL, source TEXT NOT NULL,
     pr INTEGER, state TEXT NOT NULL, link TEXT, head TEXT, observed_at REAL NOT NULL,
     PRIMARY KEY(batch, kind, name));
+CREATE TABLE IF NOT EXISTS authority_journal(
+    id TEXT PRIMARY KEY, operation TEXT NOT NULL, state TEXT NOT NULL, details TEXT NOT NULL,
+    created REAL NOT NULL, updated REAL NOT NULL);
 """.format(tasks=TASKS.format(name="tasks"))
 
 
@@ -132,7 +135,7 @@ class Store:
                 if c.execute("PRAGMA foreign_key_check").fetchall():
                     raise ValueError("state database migration found foreign key violations")
                 c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
-            elif versions in ([3], [4]):
+            elif versions in ([3], [4], [5]):
                 c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
             elif versions != [SCHEMA_VERSION]:
                 raise ValueError(f"unsupported state database schema version {versions}")

@@ -6,7 +6,7 @@ Choose when and where CI runs for a software engineering agent swarm.
 
 Starlings facilitates running CI locally for a swarm of software engineering agents, instead of on paid hosted CI services such as GitHub Actions and the like. It is not a CI system itself. It is a workflow for CI runs and integration checks across many worktrees. As the swarm's work moves from task worktrees into lanes, onto a staging branch and finally onto a release branch, you decide at which of those steps your checks run, and Starlings schedules them on your machine within the CPU, memory and time it has. Nothing lands on a gated branch without a signed, passing result for that exact commit.
 
-Version 0.1.0 is the first release, and it covers the complete local workflow. Coordinating gates on hosted CI (GitHub Actions) is included as an experimental option that has not been tested end to end yet. See [Hosted checks on GitHub](#hosted-checks-on-github-experimental).
+Version 0.2.0 adds a mirror authority for projects whose branches live on a Git host; the local bare repository remains the authority. Coordinating gates on hosted CI (GitHub Actions) is included as an experimental option that has not been tested end to end yet. See [Hosted checks on GitHub](#hosted-checks-on-github-experimental).
 
 ## Why Starlings
 
@@ -104,9 +104,9 @@ fully_verified_release = true
 requires_starlings = ">=0.2"
 
 [authority]
-mode = "mirror"                # a local bare authority that follows and publishes to the upstream
+mode = "mirror"                # the authority stays local; this names its upstream
 upstream = "git@git.example.com:team/sample-ledger.git"
-publish_staging = true         # also move staging to the release commit, in the same atomic push
+publish_staging = true         # optional: move staging with release in the same push
 
 [gates.task]
 scope = "none"
@@ -122,7 +122,7 @@ environment = "native"
 checks = ["ci"]
 
 [checks]
-ci = ["make", "ci"]            # your one check command, as an argv array
+ci = ["make", "ci"]            # an argv array, never a shell string
 
 [limits]
 cpu_slots = 4
@@ -141,7 +141,7 @@ starlings signer init
 starlings release --publish
 ```
 
-The first command cannot verify anything yet: it stops and prints the exact `policy trust` command for the policy it found on the staging branch. Run that command once you have reviewed the policy, create the signing key, and `starlings release --publish` does the rest: it merges staging into release in the local authority, runs the check on the merge commit, signs a receipt, promotes, and publishes the release with one atomic push that is never forced. Run it again for every later release; `--dry-run` verifies without landing anything, and a passing dry run is not repeated.
+The first command cannot verify anything yet: it stops and prints the exact `policy trust` command for the policy it found on the staging branch. Run that command once you have reviewed the policy, create the signing key, and `starlings release --publish` does the rest: it merges staging into release in the local authority, runs the check on the merge commit, signs a receipt, promotes, and publishes the release with one atomic fast-forward push. With `publish_staging = true`, staging moves to the release commit in the same push; the default publishes release only. Run it again for every later release; `--dry-run` verifies without landing anything, and a passing dry run is not repeated.
 
 State and the authority live under `~/.local/state/starlings/projects/<project>` unless you set `STARLINGS_STATE_DIR`. A check can take `{base}`, `{head}` and `{context}` arguments, an `[environment]` table lets native checks use your home directory or named variables, and `[identity]` sets the author of the release commit. The local bare repository stays the only authority: the upstream is followed and published to, never trusted. Details are in [docs/operations.md](docs/operations.md#one-command-release).
 
@@ -299,17 +299,18 @@ Run `starlings <command> --help` for options. Exit statuses are listed in [docs/
 
 Starlings can also coordinate gates that run on hosted CI, so you can keep some checks there while the rest run locally. The supported host today is GitHub Actions: staging and release gates can set `executor = "github"` to run their checks there through the `gh` CLI, with results bound into the same signed receipts. `starlings templates github` generates the workflow files this needs.
 
-This executor is implemented but has not yet been tested end to end against GitHub, so treat it as unsupported in 0.1.0 and use the local executor for real work. By default a `[github]` policy uses a local simulated host (`adapter = "fake"`) that exercises the workflow without contacting GitHub. The task gate always runs locally. Details are in [docs/operations.md](docs/operations.md#hosted-execution).
+This executor is implemented but has not yet been tested end to end against GitHub, so use the local executor for real work. By default a `[github]` policy uses a local simulated host (`adapter = "fake"`) that exercises the workflow without contacting GitHub. The task gate always runs locally. Details are in [docs/operations.md](docs/operations.md#hosted-execution).
 
 ## Limitations
 
 - **Local authority only.** The authority is always a local bare Git repository. A mirror authority can follow a remote and publish verified releases to it, but the remote is never the authority. Deployment is out of scope.
+- **Release-only publish.** With `publish_staging = false`, the upstream release branch is guarded through its atomic update; Git cannot lock an untouched staging branch in that transaction. Set `publish_staging = true` when both upstream refs must be protected by the same atomic push.
 - **One coordinator machine.** All CI runs on the machine that holds the state directory. Checks within one run execute one after another (separate runs share the configured slots), and task worktrees are not cleaned up automatically.
 - **Hook protection is not access control.** `authority protect` refuses unrecorded writes to staging and release, but anyone with the same login can edit or bypass the hook.
 - **Native checks are trusted.** They run as your user and can read the state directory, including the signing key. Memory and disk limits are recorded, not enforced. Use native checks only for agent work you trust to run as you.
 - **Guest checks are not a security boundary.** They run in a pinned Docker image with no network, and have been verified on one Docker setup only.
 - **Validation is structural.** `policy validate` checks the file's shape, not whether your commands are safe or give enough coverage.
-- **Tested platform.** 0.1.0 has been tested on macOS (Apple Silicon). Other platforms have not been verified yet.
+- **Tested platform.** The qualified profile is macOS (Apple Silicon). Other platforms have not been verified yet.
 
 ## Documentation
 

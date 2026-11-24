@@ -1,6 +1,6 @@
 # Release runbook
 
-Install, validate and recovery steps for a starlings wheel. Version `0.1.0` is a pre-release: commands, the policy schema and file formats can still change, and hosted (`github` executor) checks are implemented but unqualified — no passing hosted gate has been recorded.
+Install, validate and recovery steps for a starlings wheel. Version `0.2.0` adds mirror-authority release and publish commands. Hosted (`github` executor) checks are implemented but unqualified — no passing hosted gate has been recorded.
 
 ## Required tools
 

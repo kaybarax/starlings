@@ -11,10 +11,12 @@ This module holds every Git command that can reach the network (``ls-remote``,
 ``fetch`` from the upstream and ``push``); ``gitops`` stays file-protocol-only.
 """
 
+import json
 from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 
 from . import gitops
@@ -150,6 +152,15 @@ def landed_release(ctx, authority, policy, commit, release_head, staging_head):
         status, checked = assess(ctx, row["receipt_id"])
         if checked.get("outcome") != "passed":
             continue
+        from .promotion import live_approvals, required_approvals
+        plan_row = ctx.store.connection.execute("SELECT * FROM plans WHERE id = ?", (row["plan_id"],)).fetchone()
+        required = required_approvals(plan_row)
+        live = live_approvals(ctx.store.connection, row["plan_id"], ctx.store.clock())
+        if len(live) < required:
+            # Do not classify a no-longer-authorized promotion as publishable.
+            # Returning None lets sync report it as ahead and lets discard set
+            # it aside so the operator can run a fresh release.
+            continue
         head = gitops.resolve(authority, target)
         moved = [f"{target} in the authority is {head}, not the receipt base {release_head}"]
         if (status == "valid" and head == release_head) or (status == "stale" and checked["reasons"] == moved and head == commit):
@@ -197,6 +208,18 @@ def view(policy, authority, release_head, staging_head):
     return {"authority": str(authority), "upstream": redact(policy["authority"]["upstream"]), "release": release, "staging": staging, "upstream_heads": {release: release_head, staging: staging_head}}
 
 
+def journal(ctx, operation, state, details, journal_id=None):
+    """Persist mirror-operation intent and outcome before/after external writes."""
+    c = ctx.store.connection
+    now = ctx.store.clock()
+    if journal_id is None:
+        journal_id = "authority-" + secrets.token_hex(16)
+        c.execute("INSERT INTO authority_journal(id, operation, state, details, created, updated) VALUES (?, ?, ?, ?, ?, ?)", (journal_id, operation, state, json.dumps(details, sort_keys=True), now, now))
+    else:
+        c.execute("UPDATE authority_journal SET state = ?, details = ?, updated = ? WHERE id = ?", (state, json.dumps(details, sort_keys=True), now, journal_id))
+    return journal_id
+
+
 def sync(ctx, authority=None, owner=None, seconds=600):
     wanted = Path(authority) if authority is not None else ctx.root / "authority.git"
     result = {}
@@ -222,7 +245,9 @@ def sync(ctx, authority=None, owner=None, seconds=600):
         updated = []
         for branch, ours, theirs in ((release, ours_release, release_head), (staging, ours_staging, staging_head)):
             if ours != theirs:
+                journal_id = journal(ctx, "sync", "intent", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs})
                 move(authority, f"refs/heads/{branch}", theirs, ours, "starlings: sync from upstream")
+                journal(ctx, "sync", "complete", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs}, journal_id)
                 updated.append({"branch": branch, "old": ours, "new": theirs})
         result.update({"state": "synced", "unpublished": None, "updated": updated, "authority_heads": {release: release_head, staging: staging_head}})
     return "ok", result
@@ -249,27 +274,58 @@ def publish(ctx, authority=None, owner=None, seconds=600):
             if has_commit(authority, held) and list(gitops.parents_of(authority, held)) != [release_head, staging_head]:
                 raise Failure("stale", "upstream-moved", f"the upstream {release} or {staging} moved since authority {release} {held} was verified against them. Nothing was pushed; the authority holds the unpublished release. Set it aside and release the new heads: starlings authority discard", result)
             raise Failure("blocked", "unverified-release", f"authority {release} {held} is not a recorded promotion of the current upstream heads with a valid passing receipt. Nothing was pushed.", result)
+        # The publish may advance release only from the exact observed upstream
+        # release head. Check ancestry here, then use leases for both expected
+        # upstream refs in push so even a rewind (which would otherwise make a
+        # fast-forward possible) invalidates this attempt.
+        if not gitops.is_ancestor(authority, release_head, held):
+            raise Failure("stale", "upstream-moved", f"authority release {held} is not a fast-forward of upstream {release} {release_head}; nothing was pushed", result)
         result.update({"promotion_id": landed["id"], "plan_id": landed["plan_id"], "receipt_id": landed["receipt_id"]})
         refspecs = [f"{held}:refs/heads/{release}"] + ([f"{held}:refs/heads/{staging}"] if with_staging else [])
         result["refspecs"] = refspecs
         ctx.hook("before-push", {"authority": str(authority), "commit": held, "refspecs": refspecs})
         still_held()
-        pushed = run(authority, "push", "--atomic", "--porcelain", "--", url, *refspecs)
+        leases = [f"--force-with-lease=refs/heads/{release}:{release_head}", f"--force-with-lease=refs/heads/{staging}:{staging_head}"]
+        journal_id = journal(ctx, "publish", "intent", {"authority": str(authority), "upstream": redact(url), "commit": held, "expected": {release: release_head, staging: staging_head}, "refspecs": refspecs, "publish_staging": with_staging})
+        try:
+            pushed = run(authority, "push", "--atomic", "--porcelain", *leases, "--", url, *refspecs)
+        except OSError as exc:
+            journal(ctx, "publish", "failed", {"authority": str(authority), "commit": held, "spawn_error": str(exc)}, journal_id)
+            raise Failure("failed", "publish-refused", f"could not start the Git push; nothing was sent and the authority still holds the unpublished release {held}: {exc}", result) from exc
         if pushed.returncode:
             detail = redact((pushed.stderr.strip() + "\n" + pushed.stdout.strip()).strip())
             try:
                 now = heads(authority, policy)
-            except Failure:
+            except Failure as exc:
                 now = None
+                read_error = exc.message
+            else:
+                read_error = None
             result["push"] = {"status": pushed.returncode, "detail": detail[-2000:]}
-            if now is not None and now != (release_head, staging_head):
-                raise Failure("stale", "upstream-moved", f"the upstream moved during the publish and refused the push. Nothing is known to be published; read the upstream heads and start again.\n{detail}", result)
-            raise Failure("failed", "publish-refused", f"the upstream refused the atomic push, so neither branch was updated; the authority still holds the unpublished release {held}. Fix the cause and publish again.\n{detail}", result)
+            expected = (held, held if with_staging else staging_head)
+            if now == expected:
+                # A lost acknowledgement can leave Git reporting failure after
+                # the atomic transaction completed. The read-back is decisive.
+                result["push"]["acknowledgement"] = "nonzero, but expected upstream heads are confirmed"
+            elif now is None:
+                journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "status": pushed.returncode, "detail": detail[-2000:], "confirmation_error": read_error}, journal_id)
+                raise Failure("failed", "publish-unconfirmed", f"the push reported failure and the upstream could not be read back ({read_error}); inspect both branches before retrying", result)
+            elif now != (release_head, staging_head):
+                journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "status": pushed.returncode, "detail": detail[-2000:], "observed_heads": list(now)}, journal_id)
+                raise Failure("failed", "publish-unconfirmed", f"the push reported failure and the upstream heads are now {now}; the publish outcome is ambiguous. Inspect both branches before retrying.\n{detail}", result)
+            else:
+                journal(ctx, "publish", "failed", {"authority": str(authority), "commit": held, "status": pushed.returncode, "detail": detail[-2000:]}, journal_id)
+                raise Failure("failed", "publish-refused", f"the upstream refused the atomic push, so neither branch was updated; the authority still holds the unpublished release {held}. Fix the cause and publish again.\n{detail}", result)
         ctx.hook("after-push", {"authority": str(authority), "commit": held})
-        confirmed = heads(authority, policy)
+        try:
+            confirmed = heads(authority, policy)
+        except Failure as exc:
+            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected": [held, held if with_staging else staging_head], "confirmation_error": exc.message}, journal_id)
+            raise Failure("failed", "publish-unconfirmed", f"the push reported success, but the upstream heads could not be confirmed ({exc.message}); inspect both branches before retrying", result) from exc
         expected = (held, held if with_staging else staging_head)
         if confirmed != expected:
             result["confirmed"] = list(confirmed)
+            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected": list(expected), "confirmed": list(confirmed)}, journal_id)
             raise Failure("failed", "publish-unconfirmed", f"the push reported success but the upstream heads are {confirmed}, not {expected}", result)
         if with_staging:
             ours_staging = gitops.resolve(authority, f"refs/heads/{staging}")
@@ -280,6 +336,7 @@ def publish(ctx, authority=None, owner=None, seconds=600):
             if current != sha:
                 gitops.update_ref(authority, f"refs/upstream/{branch}", sha, current or gitops.zero(authority), "starlings: published")
         result.update({"published": True, "state": "published", "upstream_heads": {release: confirmed[0], staging: confirmed[1]}})
+        journal(ctx, "publish", "complete", {"authority": str(authority), "commit": held, "upstream_heads": list(confirmed)}, journal_id)
     return "ok", result
 
 
@@ -308,9 +365,12 @@ def discard(ctx, authority=None, force=False, owner=None, seconds=600):
             updates = [(ref, theirs, ours)]
             if gitops.ref_value(authority, kept) != ours:
                 updates.insert(0, (kept, ours, gitops.zero(authority)))
+            journal_id = journal(ctx, "discard", "intent", {"authority": str(authority), "branch": branch, "commit": ours, "kept_at": kept, "now": theirs})
             applied, detail = gitops.ref_transaction(authority, [], updates, "starlings: discard unpublished")
             if not applied:
+                journal(ctx, "discard", "failed", {"authority": str(authority), "branch": branch, "detail": detail or "compare-and-swap failed"}, journal_id)
                 raise Failure("stale", "stale", f"{ref} in the authority moved concurrently ({detail or 'compare-and-swap failed'}); nothing further was written", result)
+            journal(ctx, "discard", "complete", {"authority": str(authority), "branch": branch, "commit": ours, "kept_at": kept, "now": theirs}, journal_id)
             result["discarded"].append({"branch": branch, "commit": ours, "kept_at": kept, "now": theirs})
         result["authority_heads"] = {release: gitops.resolve(authority, f"refs/heads/{release}"), staging: gitops.resolve(authority, f"refs/heads/{staging}")}
     return "ok", result

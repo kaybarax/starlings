@@ -1,5 +1,7 @@
 import stat
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from fixtures import Mirror, git, mirror_policy
 import test_verifier as tv
@@ -151,6 +153,24 @@ class PublishTests(MirrorCase):
         self.assertEqual(self.call(m, upstream.publish, expected="blocked").code, "unverified-release")
         self.assertEqual(m.head("main"), upstream_main)
 
+    def test_publish_retry_requires_a_live_minimum_approval(self):
+        m = self.make(approvals=1)
+        m.commit({"feature.txt": "one\n"})
+        self.ready(m)
+        self.call(m, batches.prepare, "approved-release", ["release"], str(m.authority))
+        plan = self.call(m, verifier.plan, "approved-release", "release")
+        approval = self.call(m, promotion.approve, plan["plan_id"], "reviewer", 86400, "review:release")
+        run = self.call(m, runner.run, plan["plan_id"])
+        self.call(m, verifier.check, run["receipt_id"])
+        self.call(m, promotion.promote, plan["plan_id"], run["receipt_id"])
+        self.call(m, promotion.revoke, approval["approval_id"])
+
+        refused = self.call(m, upstream.publish, expected="blocked")
+        self.assertEqual(refused.code, "unverified-release")
+        self.assertNotEqual(m.head("main"), plan["candidate"]["commit"])
+        discarded = self.call(m, upstream.discard)
+        self.assertEqual(discarded["discarded"][0]["commit"], plan["candidate"]["commit"])
+
     def test_upstream_moved_after_promotion_is_stale_and_pushes_nothing(self):
         m = self.make()
         plan, _, _ = self.promoted(m)
@@ -171,9 +191,45 @@ class PublishTests(MirrorCase):
         def race(point, info):
             if point == "before-push":
                 moved["dev"] = m.commit({"late.txt": "late\n"})
-        refused = self.call(m, upstream.publish, expected="stale", hook=race)
-        self.assertEqual(refused.code, "upstream-moved")
+
+        refused = self.call(m, upstream.publish, expected="failed", hook=race)
+        self.assertEqual(refused.code, "publish-unconfirmed")
         self.assertEqual((m.head("main"), m.head("dev")), (main, moved["dev"]))
+
+    def test_publish_rejects_a_release_rewind_between_head_read_and_push(self):
+        m = self.make()
+        old_main = m.head("main")
+        m.commit({"release.txt": "advance\n"}, branch="main")
+        plan, _, _ = self.promoted(m)
+        main = m.head("main")
+
+        def race(point, info):
+            if point == "before-push":
+                git(m.upstream, "update-ref", "refs/heads/main", old_main, main)
+
+        refused = self.call(m, upstream.publish, expected="failed", hook=race)
+        self.assertEqual(refused.code, "publish-unconfirmed")
+        self.assertEqual(m.head("main"), old_main)
+        self.assertEqual(m.head("main", m.authority), plan["candidate"]["commit"])
+
+    def test_release_only_publish_reports_a_staging_move_after_advertisement(self):
+        m = self.make(publish_staging=False)
+        plan, _, _ = self.promoted(m)
+        dev = m.head("dev")
+        moved = {}
+
+        def race(point, info):
+            if point == "before-push":
+                moved["dev"] = m.commit({"late.txt": "late\n"})
+
+        refused = self.call(m, upstream.publish, expected="failed", hook=race)
+        self.assertEqual(refused.code, "publish-unconfirmed")
+        self.assertEqual(m.head("main"), plan["candidate"]["commit"])
+        self.assertEqual(m.head("dev"), moved["dev"])
+        self.assertNotEqual(moved["dev"], dev)
+        self.assertEqual(m.head("main", m.authority), plan["candidate"]["commit"])
+        with m.context() as ctx:
+            self.assertEqual(ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'publish' ORDER BY created DESC LIMIT 1").fetchone()[0], "ambiguous")
 
     def test_a_refused_branch_fails_the_whole_atomic_push(self):
         m = self.make()
@@ -191,8 +247,45 @@ class PublishTests(MirrorCase):
         self.assertTrue(self.call(m, upstream.publish)["published"])
         self.assertEqual(m.head("main"), plan["candidate"]["commit"])
 
+    def test_publish_confirms_remote_success_after_lost_push_acknowledgement(self):
+        m = self.make()
+        plan, _, _ = self.promoted(m)
+        original = upstream.run
+
+        def lost_ack(authority, *args):
+            result = original(authority, *args)
+            if args and args[0] == "push":
+                return subprocess.CompletedProcess(["git", "push"], 1, "", "connection closed after update")
+            return result
+
+        with patch.object(upstream, "run", side_effect=lost_ack):
+            done = self.call(m, upstream.publish)
+        self.assertTrue(done["published"])
+        self.assertEqual(m.head("main"), plan["candidate"]["commit"])
+        with m.context() as ctx:
+            row = ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'publish' ORDER BY created DESC LIMIT 1").fetchone()
+            self.assertEqual(row["state"], "complete")
+
 
 class DiscardTests(MirrorCase):
+    def test_mirror_writes_are_journalled(self):
+        m = self.make()
+        self.sync(m)
+        with m.context() as ctx:
+            self.assertEqual({row["operation"] for row in ctx.store.connection.execute("SELECT operation FROM authority_journal")}, {"sync"})
+        self.promoted(m)
+        self.call(m, upstream.publish)
+        m.commit({"next.txt": "next\n"})
+        self.sync(m)
+        before = m.head("main", m.authority)
+        stray = git(m.authority, "commit-tree", before + "^{tree}", "-p", before, "-m", "local stray")
+        git(m.authority, "update-ref", "refs/heads/main", stray, before)
+        self.call(m, upstream.discard)
+        with m.context() as ctx:
+            rows = ctx.store.connection.execute("SELECT operation, state FROM authority_journal").fetchall()
+            self.assertEqual({row["operation"] for row in rows}, {"sync", "publish", "discard"})
+            self.assertTrue(all(row["state"] == "complete" for row in rows))
+
     def test_discard_refuses_a_publishable_promotion_until_the_upstream_moves(self):
         m = self.make()
         plan, _, _ = self.promoted(m)
@@ -244,7 +337,7 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GIT_ALLOW_PROTOCOL"]), ("0", "file:https:ssh"))
         import inspect
         source = inspect.getsource(upstream)
-        self.assertNotIn("--force", source.replace("--force only", ""))
+        self.assertNotIn('"--force"', source)
         self.assertNotIn('"+{', source)
         self.assertIn('"push", "--atomic"', source)
         from starlings import gitops

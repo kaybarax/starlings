@@ -599,7 +599,7 @@ class MigrationTests(unittest.TestCase):
         fixture.state.mkdir(mode=0o700)
         path = fixture.state / "starlings.db"
         os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
-        added = ("run_processes", "task_candidates", "approvals", "promotions", "include_intents", "authorities", "diagnostic_runs")
+        added = ("run_processes", "task_candidates", "approvals", "promotions", "include_intents", "authorities", "diagnostic_runs", "authority_journal")
         verifier_tables = ("trusted_policies", "release_candidates", "plans", "runs", "evidence", "receipts")
         statements = [item.replace("'parked', 'pending', 'included'", "'parked', 'included'") for item in store.SCHEMA.split(";") if item.strip() and not any(f"EXISTS {name}(" in item for name in added)]
         if version == 1:
@@ -637,6 +637,13 @@ class MigrationTests(unittest.TestCase):
                         c.execute("DELETE FROM tasks WHERE name = 'one'")
                 with store.Store(path) as reopened:
                     self.assertEqual(reopened.connection.execute("SELECT state FROM tasks WHERE name = 'one'").fetchone()[0], "pending")
+
+    def test_migrates_version_5_with_authority_journal(self):
+        fixture, path = self.legacy(5)
+        with store.Store(path) as migrated:
+            self.assertEqual(migrated.connection.execute("SELECT version FROM schema_version").fetchone()[0], 6)
+            self.assertIn("authority_journal", {row[0] for row in migrated.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")})
+        fixture.close()
 
 
 class PromotionCLITests(PromotionCase):
