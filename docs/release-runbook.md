@@ -15,9 +15,9 @@ Build offline from the source checkout, record the digest, and install into a fr
 
 ```sh
 uv build --offline --wheel --out-dir <wheel-dir>
-shasum -a 256 <wheel-dir>/starlings-0.1.0-py3-none-any.whl   # record this digest
+shasum -a 256 <wheel-dir>/starlings-0.2.0-py3-none-any.whl   # record this digest
 python3 -m venv <venv-dir>
-<venv-dir>/bin/python -m pip install <wheel-dir>/starlings-0.1.0-py3-none-any.whl
+<venv-dir>/bin/python -m pip install <wheel-dir>/starlings-0.2.0-py3-none-any.whl
 <venv-dir>/bin/starlings --version
 ```
 

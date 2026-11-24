@@ -69,7 +69,7 @@ class Context:
             raise invalid("--directory must identify an existing directory")
         self.directory = directory
         if state_dir is None:
-            raise invalid("--state-dir or STARLINGS_STATE_DIR is required")
+            raise invalid("--state-dir or STARLINGS_STATE_DIR is required (there is no starlings.toml with a usable project name in --directory to derive the default from)")
         if not create and not Path(state_dir).is_dir():
             raise invalid(f"state directory does not exist: {state_dir}")
         try:

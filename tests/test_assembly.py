@@ -527,7 +527,14 @@ class AssemblyTests(unittest.TestCase):
             with patch("sys.stdout", out), patch("sys.stderr", io.StringIO()):
                 code = main([*args, "--json", "--directory", str(f.project)])
             return code, json.loads(out.getvalue())
-        self.assertEqual(call("batch", "prepare", "b1", "--lanes", "ledger", "--authority", str(f.authority))[0], 2)
+        home = f.root / "home"
+        home.mkdir()
+        with patch.dict("os.environ", {"HOME": str(home)}):
+            code, result = call("batch", "prepare", "b0", "--lanes", "ledger", "--authority", str(f.authority))
+        self.assertEqual((code, Path(result["data"]["mirror"]).parents[1]), (0, home / ".local" / "state" / "starlings" / "projects" / "fixture-project"))
+        (f.project / "starlings.toml").rename(f.project / "moved.toml")
+        self.assertEqual(call("status", "b1")[0], 2)
+        (f.project / "moved.toml").rename(f.project / "starlings.toml")
         self.assertEqual(call("batch", "prepare", "b1", "--lanes", "ledger", "--authority", str(f.seed), "--state-dir", str(f.state))[0], 2)
         self.assertEqual(call("batch", "prepare", "b1", "--lanes", "ledger", "--authority", "relative.git", "--state-dir", str(f.state))[0], 2)
         code, result = call("batch", "prepare", "b1", "--lanes", "ledger", "--authority", str(f.authority), "--state-dir", str(f.state))

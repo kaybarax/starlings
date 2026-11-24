@@ -75,7 +75,7 @@ Build a wheel from a source checkout and install it into a fresh virtual environ
 ```sh
 uv build --offline --wheel --out-dir <wheel-dir>
 python3 -m venv <venv-dir>
-<venv-dir>/bin/python -m pip install <wheel-dir>/starlings-0.1.0-py3-none-any.whl
+<venv-dir>/bin/python -m pip install <wheel-dir>/starlings-0.2.0-py3-none-any.whl
 <venv-dir>/bin/starlings --version
 ```
 
@@ -212,7 +212,7 @@ The `[limits]` table sizes CI to your machine: `cpu_slots` and `max_guests` boun
 
 ## State and trust
 
-Starlings keeps its database, worktrees, logs, trusted policies, receipts and signing key in a private state directory, separate from your checkout. Set it with `--state-dir` or `STARLINGS_STATE_DIR`. The default is `~/.local/state/starlings`.
+Starlings keeps its database, worktrees, logs, trusted policies, receipts and signing key in a private state directory, separate from your checkout. Set it with `--state-dir` or `STARLINGS_STATE_DIR`. Without either, commands run in a directory that has a `starlings.toml` use `~/.local/state/starlings/projects/<project>`.
 
 Three things carry trust: the policy version registered with `policy trust`, the signing key created by `signer init`, and the receipts that key signs. `check` and `promote` verify all of them again before anything lands. The signing key is stored unencrypted and is protected only by the state directory's permissions.
 

@@ -7,6 +7,7 @@ PRESETS = ("release-only", "combined-lanes-release", "each-lane-release", "every
 RESOURCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
 REUSABLE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
+REQUIRES = re.compile(r">=\d{1,4}\.\d{1,4}(\.\d{1,4})?")
 UPSTREAM = re.compile(r"(/|file:///|https://|ssh://)\S+|([A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*:\S+")
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORKFLOW = re.compile(r"\.github/workflows/[a-zA-Z0-9][a-zA-Z0-9._-]*\.(yml|yaml)")
@@ -43,9 +44,15 @@ def strings(value, path, nonempty=True):
 
 
 def validate(data):
-    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github", "environment", "identity"))
+    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github", "environment", "identity", "requires_starlings"))
     require(type(data["schema"]) is int and data["schema"] == 1, "schema", "only integer schema version 1 is supported")
     text(data["project"], "project")
+    if "requires_starlings" in data:
+        wanted = data["requires_starlings"]
+        require(type(wanted) is str and bool(REQUIRES.fullmatch(wanted)), "requires_starlings", 'expected a minimum version such as ">=0.2" or ">=0.2.1"')
+        from . import __version__
+        need, have = version_tuple(wanted[2:]), version_tuple(__version__)
+        require(have >= need, "requires_starlings", f"this policy needs starlings {wanted}, but starlings {__version__} is installed; upgrade starlings")
     for key in ("staging", "release"):
         value = data[key]
         text(value, key)
@@ -157,6 +164,11 @@ def validate(data):
     return data
 
 
+def version_tuple(value):
+    parts = [int(part) for part in re.findall(r"\d+", value)[:3]]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
 def relative(path):
     return not path.startswith("/") and all(part not in ("", ".", "..") for part in path.split("/"))
 
@@ -189,7 +201,7 @@ def render(data):
     validate(data)
     def value(item):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
-    lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release")]
+    lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release", "requires_starlings") if key in data]
     for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github", "environment", "identity") if section in data), ("limits", data["limits"])]:
         lines.extend(["", f"[{section}]"])
         lines.extend(f"{key} = {value(item)}" for key, item in entries.items())

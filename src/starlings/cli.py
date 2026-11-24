@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import sqlite3
 import sys
@@ -160,14 +161,33 @@ def parser():
         command.add_argument("--owner", help="lease owner label (default host:pid)")
         command.add_argument("--lease-seconds", type=int, default=600)
     for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent, sync, publish, discard, release_cmd):
-        command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR)")
+        command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR; default: ~/.local/state/starlings/projects/<project> for the starlings.toml in --directory)")
     for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github, sync, publish, discard, release_cmd):
         command.add_argument("--directory", type=Path, default=Path.cwd(), help="existing project directory")
     return result
 
 
+def default_state(directory):
+    """Per-project state by convention: ~/.local/state/starlings/projects/<project> for the policy in ``directory``."""
+    try:
+        name = parse((Path(directory) / "starlings.toml").read_text(encoding="utf-8"))["project"]
+    except (OSError, PolicyError, UnicodeError):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", name) or name.endswith("."):
+        return None
+    return Path.home() / ".local" / "state" / "starlings" / "projects" / name
+
+
 def batch_command(args):
-    with batches.Context(args.state_dir, args.directory, create=args.command not in ("status", "check", "cancel", "approve", "revoke", "promote", "recover", "diagnose")) as ctx:
+    create = args.command not in ("status", "check", "cancel", "approve", "revoke", "promote", "recover", "diagnose")
+    state_dir = args.state_dir
+    if state_dir is None:
+        state_dir = default_state(args.directory)
+        if state_dir is not None and create:
+            for parent in reversed([state_dir.parent, *state_dir.parent.parents]):
+                if not parent.exists():
+                    parent.mkdir(mode=0o700)
+    with batches.Context(state_dir, args.directory, create=create) as ctx:
         if args.command == "policy":
             for name in ("authority", "commit", "review"):
                 if getattr(args, name) is None:
@@ -307,7 +327,7 @@ def perform(args, json_output=False):
                 exclusive_write(target, content)
         preview = "".join(f"# === {relative} ===\n{content}\n" for relative, content in files.items())
         return {"written": args.write, "path": str(root / ".github" / "workflows"), "files": files, "toml": preview, "warnings": warnings(policy)}
-    state = layout(root, args.state_dir)
+    state = layout(root, args.state_dir or default_state(root))
     policy = parse(manifest.read_text(encoding="utf-8")) if manifest.exists() else None
     hook = enforcement.probe(args.state_dir, args.authority)
     return {"version": __version__, "python": platform.python_version(), "platform": platform.system(), "git_available": shutil.which("git") is not None, "git": probe(gitops.version), "ssh_keygen": shutil.which("ssh-keygen"), "signer_present": signer.present(state["root"]) if Path(state["root"]).is_dir() else False, "docker": probe(docker_probe), "colima": probe(colima_probe), "manifest_present": policy is not None, "policy_valid": True if policy is not None else None, "state": state, "state_created": False, "authority_mode": policy["authority"]["mode"] if policy is not None else "local-bare", "authority_configured": False, "enforcement": hook, "enforcement_implemented": hook["implemented"], "signing_implemented": True, "adapters": adapters_host.probe(state["root"], policy), "unsupported": ["remote authorities", "deployment", "hosted execution", "guest security isolation", "memory and disk enforcement for native checks", "credential separation on the same login", "harness adoption"], "warnings": warnings(policy) if policy is not None else ["No starlings.toml found. Preview with starlings init.", "Local bare refs are the first authority design; no authority is registered or enforced."]}
