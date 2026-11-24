@@ -236,7 +236,7 @@ Workers can come from one harness or several. Tell your agents in your project's
 | Verification | `plan`, `run`, `cancel`, `check` | Plan a gate, run its checks and validate the receipt. |
 | Landing and recovery | `approve`, `revoke`, `promote`, `recover` | Record approvals, land a verified candidate and reconcile after an interruption. |
 | Diagnostics | `diagnose` | Find the task or lane responsible for a failed release gate. Results never authorize a promotion. |
-| Mirror authority | `authority sync`, `authority publish`, `authority discard` | Follow an upstream repository, publish a verified release to it in one atomic push, and set aside a promotion that can no longer be published. |
+| Mirror authority | `release`, `authority sync`, `authority publish`, `authority discard` | Release the upstream staging branch in one command; or step by step: follow the upstream, publish a verified release to it in one atomic push, and set aside a promotion that can no longer be published. |
 | Templates | `templates github` | Preview or write the GitHub workflow templates used by the GitHub executor. |
 
 Run `starlings <command> --help` for options. Exit statuses are listed in [docs/policy.md](docs/policy.md#output-and-exit-statuses), and full command semantics are in [docs/operations.md](docs/operations.md).

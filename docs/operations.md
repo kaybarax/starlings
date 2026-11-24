@@ -135,9 +135,44 @@ starlings authority discard [--authority /absolute/authority.git] [--force]
 - Network Git lives in `upstream.py` only: `ls-remote`, `fetch` from the upstream and `push`. They run as argv subprocesses with hooks disabled, `GIT_TERMINAL_PROMPT=0` (a missing credential fails instead of prompting) and only the `file`, `https` and `ssh` protocols allowed; of the operator's `GIT_*` variables only `GIT_SSH`, `GIT_SSH_COMMAND` and `GIT_ASKPASS` are kept. A policy upstream that embeds credentials (`https://user@...`, `scheme://user:password@...`) is rejected, and any URL echoed in a message or result has its user part replaced by `***`. Everything else stays file-protocol-only in `gitops.py`.
 - `authority sync` takes the target leases of the staging and release branches, reads both upstream heads with `ls-remote`, fetches them to `refs/upstream/<branch>` (refs no release reads) and stops stale (`upstream-moved`) if the fetched heads differ from the ones just read. Then: authority staging that is not an ancestor of the upstream staging head is refused (`staging-ahead`, exit 5) — a mirror authority never releases staging work the upstream does not have. Authority release that is ahead of the upstream release head is accepted in exactly one case: it is a `landed` release promotion recorded in the journal whose commit has the parents (upstream release head, upstream staging head) and whose receipt is passing and still checks out (valid, or stale only because the release ref now holds that very commit). That state is reported as `state: unpublished` and no ref is moved. Any other difference is `release-ahead` (exit 5). Otherwise both branches are moved to the upstream heads by compare-and-swap. These follow-the-upstream writes are fast-forwards to commits the upstream already has; they never create or advance a release, and they run with the enforcement hook disabled because no promotion intent describes them.
 - `authority publish` takes the same leases, re-reads the upstream heads, and requires the authority release head to be such a recorded, still-valid promotion of exactly those heads: if the upstream moved it stops stale (`upstream-moved`, exit 6), and a release head with no valid record is `unverified-release` (exit 5). It then runs one `git push --atomic` of the release commit to the upstream release branch and, with `publish_staging = true`, to the upstream staging branch as well, so both move or neither does. The push is never forced: the upstream refuses anything that is not a fast-forward. A refused push reports `publish-refused` (exit 7) with the redacted remote output, or `upstream-moved` (exit 6) when the heads changed underneath it; the authority keeps the unpublished release either way. After a successful push the upstream heads are read back and compared, and with `publish_staging` the authority's staging branch is moved to the release commit to match. An upstream that already contains the authority release reports `state: up-to-date`.
-- `authority discard` is the way out of an unpublished promotion that can no longer be published (the upstream moved) or of stray local commits. It fetches the upstream heads and, for each branch that is ahead, runs one ref transaction that creates `refs/discarded/<commit>` and moves the branch back to the upstream head by compare-and-swap; the commit stays reachable and nothing is deleted. It refuses (`publishable`, exit 5) while the release head is a valid promotion of the current upstream heads — publish that instead — unless `--force` is given.
+- `authority discard` is the way out of an unpublished promotion that can no longer be published (the upstream moved) or of stray local commits. It fetches the upstream heads and, for each branch that is ahead, runs one ref transaction that creates `refs/discarded/<commit>` and moves the branch back to the upstream head by compare-and-swap; the commit stays reachable and nothing is deleted. It refuses (`publishable`, exit 5) while the release head is a valid promotion of the current upstream heads — publish that instead — unless `--force` is given. If the same upstream heads are released again later, `starlings release` restores the set-aside commit instead of landing a second one (see [One-command release](#one-command-release)).
 
 Mirror limitations: the upstream's own branch protection is outside Starlings; a writer with push rights can move the upstream between the final read and the push, which the non-forced atomic push turns into a refusal rather than an overwrite; `publish` does not delete or rewrite anything upstream; sync, publish and discard are not journalled as promotions (the set-aside refs and the upstream itself are the record).
+
+## One-command release
+
+```sh
+starlings release --dry-run
+starlings release
+starlings release --publish [--approve <review-ref>] [--by <identity>] [--timeout <seconds>]
+```
+
+`starlings release` is for a [mirror authority](#mirror-authority). It runs, in order and in one process, exactly what the individual commands do — nothing in it can land or publish something those commands would refuse:
+
+1. `authority sync` (so every refusal of sync applies: `staging-ahead`, `release-ahead`, `upstream-moved`).
+2. If the upstream release branch already contains the staging head: `Nothing to release`, exit 0.
+3. `batch prepare` with the single lane `release`, using the `starlings.toml` **from the upstream staging head** (read out of the authority, never the working directory). The batch is named `release-<release head, 12 hex>-<staging head, 12 hex>`, so the same two heads always give the same batch, the same candidate and the same plan.
+4. `plan --gate release`. With no trusted policy, or a staging head whose policy differs from the trusted one, the release stops `untrusted-policy` (exit 5) and prints the exact `starlings policy trust ... --commit <staging head> --review <review-reference>` command to run after review, including `--supersedes <digest>` when a policy is already trusted.
+5. With `--approve <review-ref>`: `approve` for that plan, by `--by`, else the policy's `[identity] name`, else the login name, valid for 24 hours.
+6. `run`, then `check`. A passing receipt already signed for the same plan is reused, which is why `--publish` after a passing `--dry-run` of the same heads does not run the checks again. `--timeout` may only lower the trusted limit.
+7. `--dry-run` stops here: nothing is promoted or published.
+8. The upstream heads are read again; if either moved during the checks the release stops `upstream-moved` (exit 6) with nothing promoted.
+9. `promote`. If this exact plan and receipt already landed and the release was since set aside by `authority discard`, the recorded landing is restored instead: under the target lease the receipt must check as fully valid again, approvals and the staging source are rechecked, and the same compare-and-swap ref transaction puts the set-aside commit back — no second release commit is made for the same heads.
+10. Without `--publish` the release stops here, promoted in the authority and unpublished. With `--publish`: `authority publish`.
+
+A promotion that an earlier run landed but did not publish is recognised by step 1; `starlings release --publish` then goes straight to publishing it, and `--dry-run` only reports it.
+
+Output: without `--json` the release prints one progress line per step (heads, batch, plan, candidate, each check with its status, exit code or signal and duration, receipt, promotion, publication). With `--json` the result carries `state` (`nothing-to-release`, `verified`, `promoted`, `unpublished`, `published`), `steps`, `timings` and the IDs. When a step stops the release, the message names the step and the code, and ends with what that exit status means:
+
+| Exit | Meaning |
+| --- | --- |
+| 3 | Conflict: a different record already exists under the same name, or a needed file is missing or unwritable. Nothing landed or published. |
+| 4 | Pending: a step was accepted but has not finished. Run the same command again; `recover <batch>` first if it reports a held lease. |
+| 5 | Blocked: a precondition does not hold (`untrusted-policy`, `no-signer`, `approval-required`, `release-conflict`, `staging-ahead`, `release-ahead`, `lease-held`). Nothing landed or published by this command. |
+| 6 | Stale: a branch, the trusted policy, an approval or the receipt changed during the release. The message says what was and was not written. |
+| 7 | Failed: a check failed (a check ended by a signal is reported as `killed by signal N`), the run was interrupted, or Git, the upstream or the database reported an error. |
+
+SIGINT or SIGTERM to `starlings release` cancels a running check through the runner (process group terminated, no receipt signed) and otherwise takes effect before the next step, never in the middle of a promotion or a push; the message says whether the release had already been promoted.
 
 ## Hosted execution
 

@@ -340,6 +340,64 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected
     return "ok", result
 
 
+def restore(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected=False):
+    """Put a landed release back on a release ref that `authority discard` set aside.
+
+    Only for a promotion already journalled as landed whose commit is kept at
+    refs/discarded/<commit> while the target is back at the promotion's old
+    value. Everything `promote` rechecks is rechecked under the target lease; the
+    write is the same compare-and-swap ref transaction, and no new promotion is
+    recorded because it is the recorded one.
+    """
+    owner = owner or default_owner()
+    c = ctx.store.connection
+    plan_row = load_plan(c, plan_id)
+    if plan_row["gate"] != "release":
+        raise invalid("only a release promotion can be restored")
+    row = landed_for(c, plan_id, receipt_id)
+    if row is None:
+        raise invalid(f"plan {plan_id} has no landed promotion with receipt {receipt_id}")
+    b = load_batch(c, plan_row["batch"])
+    candidate = json.loads(plan_row["candidate"])
+    repository, target, old, new = row["repository"], row["target"], row["old"], row["new"]
+    hooks = enforcement.hook_guard(c, repository, allow_unprotected)
+    lease = acquire(ctx, target_resource("release", b, target), owner, seconds)
+    result = {"plan_id": plan_id, "receipt_id": receipt_id, "promotion_id": row["id"], "target": target, "old": old, "new": new}
+    try:
+        result["recovery"] = reconcile_target(ctx, lease, repository, target)
+        ensure_unparked(c, repository, target)
+        if gitops.resolve(Path(repository), target) == new:
+            result.update({"restored": False, "repeated": True})
+            return "ok", result
+        if gitops.ref_value(Path(repository), f"refs/discarded/{new}") != new:
+            raise Failure("blocked", "not-discarded", f"{new} is not kept at refs/discarded/{new}; only a promotion set aside by starlings authority discard is restored. Nothing was written.", result)
+        status, checked = assess(ctx, receipt_id)
+        result["check"] = {key: checked.get(key) for key in ("status", "outcome", "reasons", "authority_head", "base")}
+        if status != "valid":
+            raise Failure("invalid" if status == "invalid" else "failed" if status == "failed" else "stale", f"{status}-receipt" if status != "failed" else "receipt-failed", f"receipt {receipt_id} is {status}: " + "; ".join(checked["reasons"]) + "; nothing was written", result)
+        required = required_approvals(plan_row)
+        approvals = [item["id"] for item in live_approvals(c, plan_id, ctx.store.clock())]
+        if len(approvals) < required:
+            raise Failure("blocked", "approval-required", f"the release gate requires {required} live approval(s) for plan {plan_id}; {len(approvals)} found; nothing was written", result)
+        reasons, verify, found = sources(c, b, plan_row, candidate)
+        if reasons:
+            raise Failure("stale", "stale-source", "; ".join(reasons) + "; nothing was written", result)
+        with ctx.store.transaction() as tx:
+            ctx.store.check(tx, lease)
+        applied, detail = gitops.ref_transaction(Path(repository), verify, [(target, new, old)], f"starlings: restore {plan_id} {receipt_id}", hooks=hooks)
+        if not applied:
+            raise Failure("stale", "stale", f"the ref transaction was refused ({detail or 'verify failed'}); nothing was written", result)
+        observed, problems = landed_problems(repository, target, new, candidate["tree"], candidate["parents"])
+        if problems:
+            raise Failure("failed", "ambiguous-landing", "; ".join(problems), result)
+        result.update({"restored": True, "repeated": False})
+    except LeaseLost as exc:
+        raise Failure("stale", "lease-lost", f"{exc}; nothing further was written", result) from exc
+    finally:
+        release(ctx, lease, result)
+    return "ok", result
+
+
 def group_alive(pgid):
     try:
         os.killpg(pgid, 0)

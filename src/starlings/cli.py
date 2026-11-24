@@ -12,6 +12,7 @@ import threading
 
 from . import __version__
 from . import batches, demo, diagnose, enforcement, examples, gitops, promotion, runner, signer, upstream, verifier
+from . import release as release_flow
 from .adapters import host as adapters_host
 from .adapters import templates as adapters_templates
 from .gitops import GitError
@@ -71,6 +72,14 @@ def parser():
     promote = commands.add_parser("promote", help="recheck a receipt and land its candidate with one atomic ref transaction")
     promote.add_argument("plan_id")
     promote.add_argument("--receipt", required=True, help="receipt ID issued for the plan")
+    release_cmd = commands.add_parser("release", help="mirror authority: sync, plan, run, check, promote and optionally publish the release of the upstream staging head in one command")
+    how = release_cmd.add_mutually_exclusive_group()
+    how.add_argument("--dry-run", action="store_true", help="verify only: everything except promote and publish; a later release of the same heads reuses the receipt")
+    how.add_argument("--publish", action="store_true", help="after promoting, push the release to the upstream in one atomic push (also publishes an earlier unpublished promotion)")
+    release_cmd.add_argument("--approve", metavar="REVIEW", help="record an approval of this release plan with this review reference before running")
+    release_cmd.add_argument("--by", help="approving identity for --approve (default: the policy [identity] name, else the login name)")
+    release_cmd.add_argument("--timeout", type=int, help="per-check timeout in seconds; may only lower the trusted limit")
+    release_cmd.add_argument("--authority", type=Path, help="absolute path to the local bare authority (default: authority.git in the state directory)")
     diagnose_cmd = commands.add_parser("diagnose", help="attribute a failed release gate to a task, lane or lane pair over frozen subsets; never produces a receipt")
     diagnose_cmd.add_argument("batch")
     diagnose_cmd.add_argument("--gate", required=True, choices=("release",))
@@ -145,14 +154,14 @@ def parser():
     stage.add_argument("--review", help="review reference for --resolution")
     status = commands.add_parser("status", help="show batch, task, lane and candidate state")
     status.add_argument("batch")
-    for command in (stage, promote):
+    for command in (stage, promote, release_cmd):
         command.add_argument("--allow-unprotected", action="store_true", help="proceed even when a recorded hook-protected authority is missing or has a modified enforcement hook")
-    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy, diagnose_cmd, protect, sync, publish, discard):
+    for command in (assemble, resolve, freeze, stage, revoke, promote, recover, policy, diagnose_cmd, protect, sync, publish, discard, release_cmd):
         command.add_argument("--owner", help="lease owner label (default host:pid)")
         command.add_argument("--lease-seconds", type=int, default=600)
-    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent, sync, publish, discard):
+    for command in (prepare, assign, handoff, assemble, resolve, freeze, stage, status, policy, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, check_intent, sync, publish, discard, release_cmd):
         command.add_argument("--state-dir", type=Path, default=Path(os.environ["STARLINGS_STATE_DIR"]) if os.environ.get("STARLINGS_STATE_DIR") else None, help="absolute private state root (or STARLINGS_STATE_DIR)")
-    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github, sync, publish, discard):
+    for command in (init, policy, doctor, prepare, assign, handoff, assemble, resolve, freeze, stage, status, signer_init, plan, run, cancel, check, approve, revoke, promote, recover, diagnose_cmd, protect, templates_github, sync, publish, discard, release_cmd):
         command.add_argument("--directory", type=Path, default=Path.cwd(), help="existing project directory")
     return result
 
@@ -176,6 +185,13 @@ def batch_command(args):
             restore = runner.install_signals(event)
             try:
                 return runner.run(ctx, args.plan_id, args.force_fresh, args.timeout, args.owner, event)
+            finally:
+                restore()
+        if args.command == "release":
+            event = threading.Event()
+            restore = runner.install_signals(event)
+            try:
+                return release_flow.release(ctx, args.authority, "dry-run" if args.dry_run else "publish" if args.publish else None, args.approve, args.by, args.timeout, args.owner, args.lease_seconds, args.allow_unprotected, event)
             finally:
                 restore()
         if args.command == "cancel":
@@ -262,7 +278,7 @@ def perform(args, json_output=False):
         return demo.run(args.directory, json_output)
     if args.command == "authority" and args.action == "check-intent":
         return enforcement.check_intent(args.state_dir, args.authority, args.refname, args.old, args.new)
-    if args.command in ("batch", "task", "lane", "stage", "status", "signer", "plan", "run", "cancel", "check", "approve", "revoke", "promote", "recover", "diagnose", "authority") or (args.command == "policy" and args.action == "trust"):
+    if args.command in ("batch", "task", "lane", "stage", "status", "signer", "plan", "run", "cancel", "check", "approve", "revoke", "promote", "recover", "diagnose", "authority", "release") or (args.command == "policy" and args.action == "trust"):
         return batch_command(args)
     root = args.directory.resolve(strict=True)
     if not root.is_dir():
@@ -331,9 +347,13 @@ def emit(data, json_output, code=0, error=None, status=None):
     if json_output:
         print(json.dumps(result, sort_keys=True, ensure_ascii=True))
     elif error:
+        if isinstance((error.get("data") or {}).get("summary"), list) and error["data"]["summary"]:
+            print("\n".join(error["data"]["summary"]))
         print(f"starlings: {error['code']}: {error['message']}", file=sys.stderr)
     elif isinstance(data, str):
         print(data)
+    elif isinstance(data.get("summary"), list):
+        print("\n".join(data["summary"]))
     elif "toml" in data:
         for warning in data["warnings"]:
             print(warning)

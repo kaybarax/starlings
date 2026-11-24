@@ -116,7 +116,7 @@ def batch_summary(row, repeated):
     return {"batch": row["name"], "project": row["project"], "authority": row["authority"], "mirror": row["mirror"], "staging": row["staging"], "release": row["release"], "base": row["base"], "release_base": row["release_base"] or None, "base_ref": refs(row["name"])["base"], "policy_digest": row["policy_digest"], "policy_trust": "untrusted", "staging_gate": {"scope": policy["gates"]["staging"]["scope"], "mode": policy["gates"]["staging"]["mode"]}, "excluded": policy.get("assembly", {}).get("excluded", []), "repeated": repeated}
 
 
-def prepare(ctx, batch, lanes, authority):
+def prepare(ctx, batch, lanes, authority, source=None):
     check_name(batch, "batch")
     if type(lanes) is not list or not lanes or len(set(lanes)) != len(lanes):
         raise invalid("--lanes: expected a nonempty comma-separated list without duplicates")
@@ -134,8 +134,8 @@ def prepare(ctx, batch, lanes, authority):
     authority = authority.resolve(strict=True)
     if not gitops.is_bare(authority):
         raise invalid(f"authority is not a bare Git repository: {authority}")
-    manifest = ctx.directory / "starlings.toml"
-    source = manifest.read_bytes()
+    if source is None:
+        source = (ctx.directory / "starlings.toml").read_bytes()
     policy = parse(source.decode("utf-8"))
     digest = hashlib.sha256(source).hexdigest()
     staging, release = policy["staging"], policy["release"]
