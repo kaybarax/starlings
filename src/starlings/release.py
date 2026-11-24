@@ -8,6 +8,7 @@ individual command runs, with the same leases, journal and rechecks.
 """
 
 import getpass
+import shlex
 import time
 
 from . import batches, gitops, promotion, runner, upstream, verifier
@@ -39,7 +40,7 @@ def staging_policy(authority, staging, staging_head):
 
 
 def trust_command(ctx, authority, commit, trusted):
-    return f"starlings policy trust --state-dir {ctx.root} --directory {ctx.directory} --authority {authority} --commit {commit} --review <review-reference>" + (f" --supersedes {trusted['digest']}" if trusted is not None else "")
+    return f"starlings policy trust --state-dir {shlex.quote(str(ctx.root))} --directory {shlex.quote(str(ctx.directory))} --authority {shlex.quote(str(authority))} --commit {commit} --review <review-reference>" + (f" --supersedes {trusted['digest']}" if trusted is not None else "")
 
 
 def check_lines(run):
@@ -93,6 +94,8 @@ def run_release(ctx, authority, mode, approve, by, timeout, owner, seconds, allo
     release_branch, staging_branch = synced["release"], synced["staging"]
     release_head, staging_head = synced["upstream_heads"][release_branch], synced["upstream_heads"][staging_branch]
     result.update({"authority": str(authority), "upstream": synced["upstream"], "release": release_branch, "staging": staging_branch, "release_head": release_head, "staging_head": staging_head})
+    if synced.get("note"):
+        say("note: " + synced["note"])
     say(f"upstream {release_branch} {release_head}")
     say(f"upstream {staging_branch} {staging_head}")
     if synced["state"] == "unpublished":

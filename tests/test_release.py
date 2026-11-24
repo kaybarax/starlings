@@ -113,23 +113,27 @@ class ReleaseFlowTests(ReleaseCase):
         self.assertEqual(m.head("main"), m.head("main", m.authority))
 
     def test_upstream_moving_during_the_run_promotes_and_publishes_nothing(self):
-        m = self.make()
-        m.commit({"feature.txt": "one\n"})
-        self.ready(m)
-        main = m.head("main")
-        moved = {}
+        for branch in ("dev", "main"):
+            with self.subTest(moved=branch):
+                m = self.make()
+                m.commit({"feature.txt": "one\n"})
+                self.ready(m)
+                before = {"main": m.head("main"), "dev": m.head("dev")}
+                moved = {}
 
-        def move(point, info):
-            if point == "release-before-promote":
-                moved["dev"] = m.commit({"late.txt": "late\n"})
-        refused = self.release(m, "publish", "stale", hook=move)
-        self.assertEqual((refused.code, refused.data["stopped_at"]), ("upstream-moved", "reread"))
-        self.assertIn("STALE (exit 6)", refused.message)
-        self.assertIn("Nothing was promoted or published", refused.message)
-        self.assertEqual((m.head("main"), m.head("main", m.authority), m.head("dev")), (main, main, moved["dev"]))
-        self.assertEqual(self.landed(m), [])
-        again = self.release(m, "publish")
-        self.assertEqual((again["state"], again["reused"]), ("published", False))
+                def move(point, info):
+                    if point == "release-before-promote":
+                        moved[branch] = m.commit({"late.txt": "late\n"}, branch=branch)
+                refused = self.release(m, "publish", "stale", hook=move)
+                self.assertEqual((refused.code, refused.data["stopped_at"]), ("upstream-moved", "reread"))
+                self.assertIn("STALE (exit 6)", refused.message)
+                self.assertIn("Nothing was promoted or published", refused.message)
+                self.assertEqual((m.head("main"), m.head("dev")), tuple({**before, **moved}[name] for name in ("main", "dev")))
+                self.assertEqual(m.head("main", m.authority), before["main"])
+                self.assertEqual(self.landed(m), [])
+                again = self.release(m, "publish")
+                self.assertEqual((again["state"], again["reused"]), ("published", False))
+                self.assertEqual(m.head("main"), again["commit"])
 
     def test_failed_and_signal_killed_checks_never_promote(self):
         for argv, ended in ((FAIL, "exit 3"), (KILLED, "killed by signal 9")):
@@ -187,6 +191,34 @@ class ReleaseFlowTests(ReleaseCase):
         self.assertIn("restore", again["steps"])
         self.assertEqual((m.head("main"), m.head("dev")), (first["commit"], first["commit"]))
         self.assertEqual(len(self.landed(m)), 1)
+
+    def test_hook_protected_authority_releases_restores_and_refuses_direct_writes(self):
+        from starlings import enforcement
+        m = self.make()
+        m.commit({"feature.txt": "one\n"})
+        self.ready(m)
+        protected = self.call(m, enforcement.protect, str(m.authority))
+        self.assertEqual(protected["protected_refs"], ["refs/heads/dev", "refs/heads/main"])
+        main = m.head("main", m.authority)
+        stray = git(m.authority, "commit-tree", main + "^{tree}", "-p", main, "-m", "stray")
+        self.assertIn("ref-update-refused", self.raw_update(m, "refs/heads/main", stray, main))
+        first = self.release(m)
+        self.assertEqual(m.head("main", m.authority), first["commit"])
+        self.call(m, upstream.discard, force=True)
+        self.assertEqual(m.head("main", m.authority), main)
+        again = self.release(m, "publish")
+        self.assertIn("restore", again["steps"])
+        self.assertEqual((m.head("main"), m.head("dev"), m.head("dev", m.authority)), (first["commit"],) * 3)
+        m.commit({"next.txt": "two\n"})
+        self.assertEqual(self.release(m, "publish")["state"], "published")
+        self.assertEqual(m.head("main", m.authority), m.head("main"))
+
+    def raw_update(self, m, ref, new, old):
+        import subprocess
+        from fixtures import environment
+        result = subprocess.run(["git", "-C", str(m.authority), "update-ref", ref, new, old], capture_output=True, text=True, env={**environment(), "PYTHONPATH": str(SRC)}, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        return result.stderr + result.stdout
 
     def test_policy_change_on_staging_names_the_superseding_trust_command(self):
         m = self.make()

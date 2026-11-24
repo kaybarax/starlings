@@ -75,20 +75,23 @@ def local_policy(ctx):
         raise invalid(f"{manifest} is invalid: {exc}") from exc
 
 
-def governing(ctx, authority, trusted_only=False):
+def governing(ctx, authority, trusted_only=False, result=None):
     """The policy that names the upstream: the trusted one, else (first use) the local manifest."""
     trusted = current_trust(ctx.store.connection, str(authority))
-    local = local_policy(ctx)
     if trusted is None:
         if trusted_only:
             raise Failure("blocked", "untrusted-policy", f"no trusted policy for authority {authority}; run starlings policy trust first")
-        if local is None:
+        policy = local_policy(ctx)
+        if policy is None:
             raise invalid(f"no trusted policy for {authority} and no starlings.toml in {ctx.directory}; nothing names the upstream")
-        policy = local
     else:
         policy = trusted_policy(ctx, trusted["digest"])
-        if local is not None and any(local[key] != policy[key] for key in ("authority", "staging", "release")):
-            raise Failure("blocked", "upstream-mismatch", f"starlings.toml in {ctx.directory} names a different authority table, staging or release branch than the trusted policy {trusted['digest']}; the trusted policy decides where the authority syncs and publishes. Trust the reviewed policy first (starlings policy trust --supersedes {trusted['digest']}) or run from a directory whose policy matches", {"trusted_digest": trusted["digest"]})
+        try:
+            local = local_policy(ctx)
+        except Failure:
+            local = None
+        if result is not None and local is not None and any(local[key] != policy[key] for key in ("authority", "staging", "release")):
+            result["note"] = f"starlings.toml in {ctx.directory} names a different authority table, staging or release branch than the trusted policy {trusted['digest']}; the trusted policy decides where the authority syncs and publishes until a new policy is trusted"
     if policy["authority"]["mode"] != "mirror":
         raise Failure("blocked", "not-mirror", 'this command needs [authority] mode = "mirror" with an upstream in the policy; a local-bare authority has no upstream')
     return policy
@@ -195,11 +198,12 @@ def view(policy, authority, release_head, staging_head):
 
 
 def sync(ctx, authority=None, owner=None, seconds=600):
+    wanted = Path(authority) if authority is not None else ctx.root / "authority.git"
+    result = {}
+    policy = governing(ctx, wanted.resolve() if wanted.exists() else wanted, result=result)
     authority = location(ctx, authority, create=True)
-    policy = governing(ctx, authority)
-    first = not gitops.git(authority, "for-each-ref", "--count=1", "refs/heads").stdout.strip()
+    result["first_use"] = not gitops.git(authority, "for-each-ref", "--count=1", "refs/heads").stdout.strip()
     release, staging = branches(policy)
-    result = {"first_use": first}
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
         release_head, staging_head = heads(authority, policy)
         fetch(authority, policy, (release_head, staging_head))
@@ -226,10 +230,10 @@ def sync(ctx, authority=None, owner=None, seconds=600):
 
 def publish(ctx, authority=None, owner=None, seconds=600):
     authority = location(ctx, authority)
-    policy = governing(ctx, authority, trusted_only=True)
+    result = {}
+    policy = governing(ctx, authority, trusted_only=True, result=result)
     url, with_staging = policy["authority"]["upstream"], bool(policy["authority"].get("publish_staging", False))
     release, staging = branches(policy)
-    result = {}
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
         release_head, staging_head = heads(authority, policy)
         result.update(view(policy, authority, release_head, staging_head))
@@ -281,9 +285,9 @@ def publish(ctx, authority=None, owner=None, seconds=600):
 
 def discard(ctx, authority=None, force=False, owner=None, seconds=600):
     authority = location(ctx, authority)
-    policy = governing(ctx, authority)
-    release, staging = branches(policy)
     result = {"discarded": []}
+    policy = governing(ctx, authority, result=result)
+    release, staging = branches(policy)
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
         release_head, staging_head = heads(authority, policy)
         fetch(authority, policy, (release_head, staging_head))

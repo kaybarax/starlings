@@ -98,9 +98,13 @@ class SyncTests(MirrorCase):
         other = m.root / "other.git"
         git(m.root, "clone", "--quiet", "--bare", str(m.upstream), str(other))
         (m.project / "starlings.toml").write_text(mirror_policy(other))
-        self.assertEqual(self.sync(m, "blocked").code, "upstream-mismatch")
+        differing = self.sync(m)
+        self.assertEqual(differing["upstream"], str(m.upstream))
+        self.assertIn("the trusted policy decides", differing["note"])
         (m.project / "starlings.toml").unlink()
-        self.assertEqual(self.sync(m)["upstream"], str(m.upstream))
+        matching = self.sync(m)
+        self.assertEqual(matching["upstream"], str(m.upstream))
+        self.assertNotIn("note", matching)
 
     def test_local_bare_policy_has_no_upstream(self):
         m = self.make()
@@ -108,6 +112,7 @@ class SyncTests(MirrorCase):
         from starlings.policy import render
         (m.project / "starlings.toml").write_text(render(policy))
         self.assertEqual(self.sync(m, "blocked").code, "not-mirror")
+        self.assertFalse(m.authority.exists())
 
 
 class PublishTests(MirrorCase):
