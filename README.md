@@ -91,6 +91,60 @@ starlings demo --directory <empty-dir>
 
 The directory must be absent or empty, and everything the demo writes stays inside it. The summary ends with the new release commit and a `starlings status` command you can use to inspect the result.
 
+## Plug it into a project
+
+A project that keeps its staging and release branches on a Git host needs one file and no glue code. Add a `starlings.toml` to the staging branch that names the upstream repository and the command that verifies a release:
+
+```toml
+schema = 1
+project = "sample-ledger"
+staging = "dev"
+release = "main"
+fully_verified_release = true
+requires_starlings = ">=0.2"
+
+[authority]
+mode = "mirror"                # a local bare authority that follows and publishes to the upstream
+upstream = "git@git.example.com:team/sample-ledger.git"
+publish_staging = true         # also move staging to the release commit, in the same atomic push
+
+[gates.task]
+scope = "none"
+
+[gates.staging]
+mode = "each-lane"
+scope = "none"
+
+[gates.release]
+scope = "full"
+executor = "local"
+environment = "native"
+checks = ["ci"]
+
+[checks]
+ci = ["make", "ci"]            # your one check command, as an argv array
+
+[limits]
+cpu_slots = 4
+memory_mib = 8192
+disk_mib = 20480
+max_guests = 0
+timeout_seconds = 1800
+```
+
+Then, from a directory that holds that file:
+
+```sh
+starlings release --dry-run    # first use: creates the authority from the upstream, then stops and prints the trust command
+starlings policy trust --authority <authority-path> --commit <staging-sha> --review <review-ref>
+starlings signer init
+starlings release --publish
+```
+
+The first command cannot verify anything yet: it stops and prints the exact `policy trust` command for the policy it found on the staging branch. Run that command once you have reviewed the policy, create the signing key, and `starlings release --publish` does the rest: it merges staging into release in the local authority, runs the check on the merge commit, signs a receipt, promotes, and publishes the release with one atomic push that is never forced. Run it again for every later release; `--dry-run` verifies without landing anything, and a passing dry run is not repeated.
+
+State and the authority live under `~/.local/state/starlings/projects/<project>` unless you set `STARLINGS_STATE_DIR`. A check can take `{base}`, `{head}` and `{context}` arguments, an `[environment]` table lets native checks use your home directory or named variables, and `[identity]` sets the author of the release commit. The local bare repository stays the only authority: the upstream is followed and published to, never trusted. Details are in [docs/operations.md](docs/operations.md#one-command-release).
+
 ## Usage
 
 The steps below walk through the same flow by hand, using the `release-only` preset.
@@ -208,7 +262,7 @@ max_guests = 0
 timeout_seconds = 1800
 ```
 
-The `[limits]` table sizes CI to your machine: `cpu_slots` and `max_guests` bound how many checks run at once across the swarm, and `timeout_seconds` bounds each check. Optional tables add path-based check selection for scope `affected` (`[selection]`), required artifacts (`[artifacts]`), exclusive resources such as ports (`[exclusive]`), excluded paths for assembly (`[assembly]`), required approvals per gate, a pinned guest image (`[guest]`) and GitHub settings (`[github]`). Run `starlings policy validate` to check the file's structure. The full schema is in [docs/policy.md](docs/policy.md).
+The `[limits]` table sizes CI to your machine: `cpu_slots` and `max_guests` bound how many checks run at once across the swarm, and `timeout_seconds` bounds each check. Optional tables add path-based check selection for scope `affected` (`[selection]`), required artifacts (`[artifacts]`), exclusive resources such as ports (`[exclusive]`), excluded paths for assembly (`[assembly]`), required approvals per gate, a pinned guest image (`[guest]`), GitHub settings (`[github]`), what native checks inherit from your environment (`[environment]`) and the author of commits Starlings creates (`[identity]`). Run `starlings policy validate` to check the file's structure. The full schema is in [docs/policy.md](docs/policy.md).
 
 ## State and trust
 

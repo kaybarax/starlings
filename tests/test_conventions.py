@@ -77,5 +77,18 @@ class RequiresTests(unittest.TestCase):
         self.assertEqual(__version__, "0.2.0")
 
 
+class ReadmeProjectTests(unittest.TestCase):
+    def test_plug_in_policy_is_a_valid_mirror_policy_and_names_the_three_commands(self):
+        text = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+        section = text.split("## Plug it into a project", 1)[1].split("\n## ", 1)[0]
+        policy = parse(section.split("```toml\n", 1)[1].split("```", 1)[0])
+        self.assertEqual((policy["authority"]["mode"], policy["authority"]["publish_staging"]), ("mirror", True))
+        self.assertEqual([name for name, gate in policy["gates"].items() if gate["scope"] != "none"], ["release"])
+        self.assertEqual(len(policy["checks"]), 1)
+        commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
+        for wanted in ("starlings policy trust --authority", "starlings signer init", "starlings release --publish"):
+            self.assertIn(wanted, commands)
+
+
 if __name__ == "__main__":
     unittest.main()
