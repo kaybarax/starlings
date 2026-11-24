@@ -216,20 +216,134 @@ def journal(ctx, operation, state, details, journal_id=None):
         journal_id = "authority-" + secrets.token_hex(16)
         c.execute("INSERT INTO authority_journal(id, operation, state, details, created, updated) VALUES (?, ?, ?, ?, ?, ?)", (journal_id, operation, state, json.dumps(details, sort_keys=True), now, now))
     else:
-        c.execute("UPDATE authority_journal SET state = ?, details = ?, updated = ? WHERE id = ?", (state, json.dumps(details, sort_keys=True), now, journal_id))
+        row = c.execute("SELECT details FROM authority_journal WHERE id = ?", (journal_id,)).fetchone()
+        merged = json.loads(row["details"]) if row is not None else {}
+        merged.update(details)
+        c.execute("UPDATE authority_journal SET state = ?, details = ?, updated = ? WHERE id = ?", (state, json.dumps(merged, sort_keys=True), now, journal_id))
     return journal_id
+
+
+def pending_journals(ctx, operation, authority):
+    """Return this authority's unresolved mirror intents, oldest first."""
+    rows = ctx.store.connection.execute("SELECT * FROM authority_journal WHERE operation = ? AND state IN ('intent', 'ambiguous') ORDER BY created", (operation,)).fetchall()
+    return [(row, json.loads(row["details"])) for row in rows if json.loads(row["details"]).get("authority") == str(authority)]
+
+
+def ensure_policy_current(ctx, authority, policy, initial_trust_digest, trusted_only=False):
+    """The lease must protect the same governing policy used to start the command."""
+    current = governing(ctx, authority, trusted_only=trusted_only)
+    trust = current_trust(ctx.store.connection, str(authority))
+    digest = trust["digest"] if trust is not None else None
+    if current != policy or digest != initial_trust_digest:
+        raise Failure("stale", "policy-changed", "the governing policy or trust record changed before target leases were acquired; retry using the current policy", {"expected_trust_digest": initial_trust_digest, "current_trust_digest": digest})
+
+
+def unresolved_failure(operation, row, details, observed):
+    return Failure("stale", f"{operation}-recovery", f"{operation} journal {row['id']} is unresolved: the observed refs match neither its recorded precondition nor postcondition. Nothing further was written; inspect the journal details and refs, then resolve the mismatch before retrying.", {"journal_id": row["id"], "expected": details, "observed": observed})
+
+
+def recover_sync(ctx, authority, policy, upstream_heads):
+    release, staging = branches(policy)
+    expected = {release: upstream_heads[0], staging: upstream_heads[1]}
+    retry = {}
+    for row, details in pending_journals(ctx, "sync", authority):
+        branch = details.get("branch")
+        if branch not in expected:
+            raise unresolved_failure("sync", row, details, {"upstream_heads": expected})
+        wanted = details.get("new")
+        logged_heads = details.get("expected_upstream_heads")
+        if logged_heads is not None and logged_heads != expected:
+            raise unresolved_failure("sync", row, details, {"upstream_heads": expected})
+        current = gitops.resolve(authority, f"refs/heads/{branch}")
+        observed = {"branch": branch, "authority_head": current, "upstream_heads": expected}
+        if current == wanted:
+            journal(ctx, "sync", "complete", {"recovered": True, "observed": observed}, row["id"])
+        elif current == details.get("old") and wanted == expected[branch]:
+            if branch in retry:
+                raise unresolved_failure("sync", row, details, {**observed, "another_retry_intent": retry[branch]})
+            retry[branch] = row["id"]
+        else:
+            raise unresolved_failure("sync", row, details, observed)
+    return retry
+
+
+def recover_publish(ctx, authority, policy, release_head, staging_head, held):
+    release, staging = branches(policy)
+    observed = {release: release_head, staging: staging_head}
+    retry_id = None
+    recovered = False
+    for row, details in pending_journals(ctx, "publish", authority):
+        commit = details.get("commit")
+        expected_raw = details.get("expected")
+        expected = expected_raw if type(expected_raw) is dict else details.get("expected_pre")
+        with_staging = details.get("publish_staging")
+        post = {release: commit, staging: commit if with_staging else (expected or {}).get(staging)}
+        actual = observed
+        facts = {"upstream_heads": actual, "expected_pre": expected, "expected_post": post, "authority_release": held}
+        if held != commit:
+            raise unresolved_failure("publish", row, details, facts)
+        if actual == post:
+            if with_staging:
+                auth_staging = gitops.resolve(authority, f"refs/heads/{staging}")
+                before = (details.get("authority_before") or {}).get(staging, (expected or {}).get(staging))
+                if auth_staging == before:
+                    move(authority, f"refs/heads/{staging}", commit, auth_staging, "starlings: recover completed publish")
+                elif auth_staging != commit:
+                    raise unresolved_failure("publish", row, details, {**facts, "authority_staging": auth_staging, "authority_staging_before": before})
+            for branch, sha in actual.items():
+                current = gitops.ref_value(authority, f"refs/upstream/{branch}")
+                if current != sha:
+                    gitops.update_ref(authority, f"refs/upstream/{branch}", sha, current or gitops.zero(authority), "starlings: recover completed publish")
+            journal(ctx, "publish", "complete", {"recovered": True, "observed_heads": actual}, row["id"])
+            recovered = True
+        elif actual == expected:
+            if retry_id is not None:
+                raise unresolved_failure("publish", row, details, {**facts, "another_retry_intent": retry_id})
+            retry_id = row["id"]
+        else:
+            raise unresolved_failure("publish", row, details, facts)
+    return retry_id, recovered
+
+
+def recover_discard(ctx, authority, policy, upstream_heads):
+    release, staging = branches(policy)
+    expected = {release: upstream_heads[0], staging: upstream_heads[1]}
+    retry = {}
+    for row, details in pending_journals(ctx, "discard", authority):
+        branch, commit = details.get("branch"), details.get("commit")
+        if branch not in expected or details.get("expected_upstream_heads", expected) != expected:
+            raise unresolved_failure("discard", row, details, {"upstream_heads": expected})
+        ref, kept = f"refs/heads/{branch}", details.get("kept_at")
+        current, retained = gitops.resolve(authority, ref), gitops.ref_value(authority, kept)
+        observed = {"branch": branch, "authority_head": current, "kept_head": retained, "upstream_heads": expected}
+        if current == expected[branch] and retained == commit:
+            journal(ctx, "discard", "complete", {"recovered": True, "observed": observed}, row["id"])
+        elif current == commit and (retained is None or retained == commit):
+            if branch in retry:
+                raise unresolved_failure("discard", row, details, {**observed, "another_retry_intent": retry[branch]})
+            retry[branch] = row["id"]
+        else:
+            raise unresolved_failure("discard", row, details, observed)
+    return retry
 
 
 def sync(ctx, authority=None, owner=None, seconds=600):
     wanted = Path(authority) if authority is not None else ctx.root / "authority.git"
     result = {}
+    identity = str(wanted.resolve())
+    initial_trust = current_trust(ctx.store.connection, identity)
+    initial_trust_digest = initial_trust["digest"] if initial_trust is not None else None
     policy = governing(ctx, wanted.resolve() if wanted.exists() else wanted, result=result)
     authority = location(ctx, authority, create=True)
     result["first_use"] = not gitops.git(authority, "for-each-ref", "--count=1", "refs/heads").stdout.strip()
     release, staging = branches(policy)
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
+        ensure_policy_current(ctx, authority, policy, initial_trust_digest)
         release_head, staging_head = heads(authority, policy)
         fetch(authority, policy, (release_head, staging_head))
+        upstream_heads = {release: release_head, staging: staging_head}
+        still_held()
+        retry_journals = recover_sync(ctx, authority, policy, (release_head, staging_head))
         result.update(view(policy, authority, release_head, staging_head))
         ours_release, ours_staging = gitops.resolve(authority, f"refs/heads/{release}"), gitops.resolve(authority, f"refs/heads/{staging}")
         result["authority_heads"] = {release: ours_release, staging: ours_staging}
@@ -245,9 +359,10 @@ def sync(ctx, authority=None, owner=None, seconds=600):
         updated = []
         for branch, ours, theirs in ((release, ours_release, release_head), (staging, ours_staging, staging_head)):
             if ours != theirs:
-                journal_id = journal(ctx, "sync", "intent", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs})
+                journal_id = retry_journals.get(branch)
+                journal_id = journal(ctx, "sync", "intent", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs, "expected_upstream_heads": upstream_heads}, journal_id)
                 move(authority, f"refs/heads/{branch}", theirs, ours, "starlings: sync from upstream")
-                journal(ctx, "sync", "complete", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs}, journal_id)
+                journal(ctx, "sync", "complete", {"authority": str(authority), "branch": branch, "old": ours, "new": theirs, "recovered": journal_id in retry_journals.values()}, journal_id)
                 updated.append({"branch": branch, "old": ours, "new": theirs})
         result.update({"state": "synced", "unpublished": None, "updated": updated, "authority_heads": {release: release_head, staging: staging_head}})
     return "ok", result
@@ -256,18 +371,23 @@ def sync(ctx, authority=None, owner=None, seconds=600):
 def publish(ctx, authority=None, owner=None, seconds=600):
     authority = location(ctx, authority)
     result = {}
+    initial_trust = current_trust(ctx.store.connection, str(authority))
+    initial_trust_digest = initial_trust["digest"] if initial_trust is not None else None
     policy = governing(ctx, authority, trusted_only=True, result=result)
     url, with_staging = policy["authority"]["upstream"], bool(policy["authority"].get("publish_staging", False))
     release, staging = branches(policy)
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
+        ensure_policy_current(ctx, authority, policy, initial_trust_digest, trusted_only=True)
         release_head, staging_head = heads(authority, policy)
         result.update(view(policy, authority, release_head, staging_head))
         held = gitops.resolve(authority, f"refs/heads/{release}")
         result["commit"] = held
         if held is None:
             raise Failure("blocked", "nothing-to-publish", f"the authority has no {release} branch; run starlings authority sync first", result)
+        still_held()
+        retry_journal, recovered = recover_publish(ctx, authority, policy, release_head, staging_head, held)
         if held == release_head or (has_commit(authority, release_head) and gitops.is_ancestor(authority, held, release_head)):
-            result.update({"published": False, "state": "up-to-date", "note": f"the upstream {release} already contains the authority {release} {held}; nothing to publish"})
+            result.update({"published": False, "state": "up-to-date", "recovered": recovered, "note": f"the upstream {release} already contains the authority {release} {held}; nothing to publish"})
             return "ok", result
         landed = landed_release(ctx, authority, policy, held, release_head, staging_head)
         if landed is None:
@@ -286,7 +406,8 @@ def publish(ctx, authority=None, owner=None, seconds=600):
         ctx.hook("before-push", {"authority": str(authority), "commit": held, "refspecs": refspecs})
         still_held()
         leases = [f"--force-with-lease=refs/heads/{release}:{release_head}", f"--force-with-lease=refs/heads/{staging}:{staging_head}"]
-        journal_id = journal(ctx, "publish", "intent", {"authority": str(authority), "upstream": redact(url), "commit": held, "expected": {release: release_head, staging: staging_head}, "refspecs": refspecs, "publish_staging": with_staging})
+        authority_before = {release: gitops.resolve(authority, f"refs/heads/{release}"), staging: gitops.resolve(authority, f"refs/heads/{staging}")}
+        journal_id = journal(ctx, "publish", "intent", {"authority": str(authority), "upstream": redact(url), "commit": held, "expected": {release: release_head, staging: staging_head}, "authority_before": authority_before, "refspecs": refspecs, "publish_staging": with_staging}, retry_journal)
         try:
             pushed = run(authority, "push", "--atomic", "--porcelain", *leases, "--", url, *refspecs)
         except OSError as exc:
@@ -320,13 +441,14 @@ def publish(ctx, authority=None, owner=None, seconds=600):
         try:
             confirmed = heads(authority, policy)
         except Failure as exc:
-            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected": [held, held if with_staging else staging_head], "confirmation_error": exc.message}, journal_id)
+            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected_post": [held, held if with_staging else staging_head], "confirmation_error": exc.message}, journal_id)
             raise Failure("failed", "publish-unconfirmed", f"the push reported success, but the upstream heads could not be confirmed ({exc.message}); inspect both branches before retrying", result) from exc
         expected = (held, held if with_staging else staging_head)
         if confirmed != expected:
             result["confirmed"] = list(confirmed)
-            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected": list(expected), "confirmed": list(confirmed)}, journal_id)
+            journal(ctx, "publish", "ambiguous", {"authority": str(authority), "commit": held, "expected_post": list(expected), "confirmed": list(confirmed)}, journal_id)
             raise Failure("failed", "publish-unconfirmed", f"the push reported success but the upstream heads are {confirmed}, not {expected}", result)
+        still_held()
         if with_staging:
             ours_staging = gitops.resolve(authority, f"refs/heads/{staging}")
             if ours_staging != held:
@@ -343,11 +465,17 @@ def publish(ctx, authority=None, owner=None, seconds=600):
 def discard(ctx, authority=None, force=False, owner=None, seconds=600):
     authority = location(ctx, authority)
     result = {"discarded": []}
+    initial_trust = current_trust(ctx.store.connection, str(authority))
+    initial_trust_digest = initial_trust["digest"] if initial_trust is not None else None
     policy = governing(ctx, authority, result=result)
     release, staging = branches(policy)
     with target_leases(ctx, authority, policy, owner, seconds, result) as still_held:
+        ensure_policy_current(ctx, authority, policy, initial_trust_digest)
         release_head, staging_head = heads(authority, policy)
         fetch(authority, policy, (release_head, staging_head))
+        still_held()
+        upstream_heads = {release: release_head, staging: staging_head}
+        retry_journals = recover_discard(ctx, authority, policy, (release_head, staging_head))
         result.update(view(policy, authority, release_head, staging_head))
         held = gitops.resolve(authority, f"refs/heads/{release}")
         if ahead(authority, held, release_head) and not force:
@@ -365,7 +493,7 @@ def discard(ctx, authority=None, force=False, owner=None, seconds=600):
             updates = [(ref, theirs, ours)]
             if gitops.ref_value(authority, kept) != ours:
                 updates.insert(0, (kept, ours, gitops.zero(authority)))
-            journal_id = journal(ctx, "discard", "intent", {"authority": str(authority), "branch": branch, "commit": ours, "kept_at": kept, "now": theirs})
+            journal_id = journal(ctx, "discard", "intent", {"authority": str(authority), "branch": branch, "commit": ours, "kept_at": kept, "now": theirs, "expected_upstream_heads": upstream_heads}, retry_journals.get(branch))
             applied, detail = gitops.ref_transaction(authority, [], updates, "starlings: discard unpublished")
             if not applied:
                 journal(ctx, "discard", "failed", {"authority": str(authority), "branch": branch, "detail": detail or "compare-and-swap failed"}, journal_id)

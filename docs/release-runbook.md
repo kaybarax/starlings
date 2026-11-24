@@ -53,6 +53,7 @@ starlings demo --directory <empty-dir>
 ## Recovery
 
 - `starlings recover <batch>` reconciles every target and lane journal, finishes or drops interrupted promotions, marks lost runs `interrupted` (never signed) and releases their slots.
+- `starlings authority sync`, `publish` and `discard` reconcile their mirror journal under the staging and release target leases on retry. A matching recorded postcondition is marked complete; a matching precondition may be safely retried after the command rechecks the governing policy and trust, upstream heads, and (for publishable promotions) receipt and approvals. If neither matches, the command stops with the journal ID and expected/observed refs; inspect `authority_journal` and compare the local authority with both upstream heads before any manual resolution.
 - If a landing cannot be resolved from the observed ref, the target parks as `ambiguous-landing`; inspect, then resolve explicitly with `starlings recover <batch> --resolve <promotion-id> --as landed|not-applied`.
 - Leases expire: an expired lease can be taken over, and the previous owner's later write is refused. Recovery skips work whose lease is still live.
 - Crash leftovers are inspectable: `.starlings-*` init tempfiles, run worktrees and job directories under the state root, and guest containers named `starlings-<run>-<check>`.

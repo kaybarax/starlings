@@ -1,6 +1,7 @@
 import stat
 import subprocess
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from fixtures import Mirror, git, mirror_policy
@@ -48,6 +49,22 @@ class MirrorCase(unittest.TestCase):
 
 
 class SyncTests(MirrorCase):
+    def test_policy_changed_before_target_lease_is_rejected(self):
+        m = self.make()
+        original = upstream.target_leases
+
+        @contextmanager
+        def changed_policy(ctx, authority, policy, owner, seconds, result):
+            (m.project / "starlings.toml").write_text(mirror_policy(m.upstream, publish_staging=False))
+            with original(ctx, authority, policy, owner, seconds, result) as held:
+                yield held
+
+        with patch.object(upstream, "target_leases", changed_policy):
+            refused = self.sync(m, "stale")
+        self.assertEqual(refused.code, "policy-changed")
+        self.assertIsNone(m.head("main", m.authority))
+        self.assertIsNone(m.head("dev", m.authority))
+
     def test_sync_creates_and_follows_the_upstream(self):
         m = self.make()
         self.assertFalse(m.authority.exists())
@@ -230,6 +247,30 @@ class PublishTests(MirrorCase):
         self.assertEqual(m.head("main", m.authority), plan["candidate"]["commit"])
         with m.context() as ctx:
             self.assertEqual(ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'publish' ORDER BY created DESC LIMIT 1").fetchone()[0], "ambiguous")
+        retry = self.call(m, upstream.publish, expected="stale")
+        self.assertEqual(retry.code, "publish-recovery")
+        self.assertIn("expected_post", retry.data["expected"])
+        self.assertEqual(retry.data["observed"]["upstream_heads"], {"main": m.head("main"), "dev": m.head("dev")})
+
+    def test_publish_retry_reconciles_remote_postcondition_before_up_to_date_return(self):
+        m = self.make()
+        plan, _, _ = self.promoted(m)
+
+        def crash(point, info):
+            if point == "after-push":
+                raise RuntimeError("simulated interruption after remote update")
+
+        with m.context(hook=crash) as ctx, self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+            upstream.publish(ctx)
+        with m.context() as ctx:
+            row = ctx.store.connection.execute("SELECT id, state FROM authority_journal WHERE operation = 'publish' ORDER BY created DESC LIMIT 1").fetchone()
+            self.assertEqual(row["state"], "intent")
+        retried = self.call(m, upstream.publish)
+        self.assertEqual((retried["state"], retried["recovered"]), ("up-to-date", True))
+        self.assertEqual(m.head("main"), plan["candidate"]["commit"])
+        with m.context() as ctx:
+            self.assertEqual(ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'publish' ORDER BY created DESC LIMIT 1").fetchone()[0], "complete")
+
 
     def test_a_refused_branch_fails_the_whole_atomic_push(self):
         m = self.make()
@@ -268,6 +309,79 @@ class PublishTests(MirrorCase):
 
 
 class DiscardTests(MirrorCase):
+    def test_sync_and_discard_retry_reconcile_written_refs(self):
+        m = self.make()
+        self.sync(m)
+        moved = m.commit({"feature.txt": "one\n"})
+        original_journal = upstream.journal
+
+        def crash_sync(ctx, operation, state, details, journal_id=None):
+            if operation == "sync" and state == "complete":
+                raise RuntimeError("simulated interruption after sync ref update")
+            return original_journal(ctx, operation, state, details, journal_id)
+
+        with m.context() as ctx, patch.object(upstream, "journal", side_effect=crash_sync), self.assertRaisesRegex(RuntimeError, "sync ref update"):
+            upstream.sync(ctx)
+        synced = self.call(m, upstream.sync)
+        self.assertEqual(synced["updated"], [])
+        self.assertEqual(m.head("dev", m.authority), moved)
+        with m.context() as ctx:
+            self.assertEqual(ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'sync' ORDER BY created DESC LIMIT 1").fetchone()[0], "complete")
+
+        before = m.head("dev", m.authority)
+        stray = git(m.authority, "commit-tree", before + "^{tree}", "-p", before, "-m", "local stray")
+        git(m.authority, "update-ref", "refs/heads/dev", stray, before)
+
+        def crash_discard(ctx, operation, state, details, journal_id=None):
+            if operation == "discard" and state == "complete":
+                raise RuntimeError("simulated interruption after discard ref update")
+            return original_journal(ctx, operation, state, details, journal_id)
+
+        with m.context() as ctx, patch.object(upstream, "journal", side_effect=crash_discard), self.assertRaisesRegex(RuntimeError, "discard ref update"):
+            upstream.discard(ctx)
+        discarded = self.call(m, upstream.discard)
+        self.assertEqual(discarded["discarded"], [])
+        self.assertEqual(m.head("dev", m.authority), moved)
+        with m.context() as ctx:
+            self.assertEqual(ctx.store.connection.execute("SELECT state FROM authority_journal WHERE operation = 'discard' ORDER BY created DESC LIMIT 1").fetchone()[0], "complete")
+
+    def test_unapplied_sync_discard_and_publish_intents_are_retried(self):
+        m = self.make()
+        def fail_move(*args, **kwargs):
+            raise RuntimeError("interrupted before sync ref write")
+
+        with m.context() as ctx, patch.object(upstream, "move", side_effect=fail_move), self.assertRaisesRegex(RuntimeError, "before sync"):
+            upstream.sync(ctx)
+        synced = self.call(m, upstream.sync)
+        self.assertEqual(synced["state"], "synced")
+        with m.context() as ctx:
+            self.assertEqual(ctx.store.connection.execute("SELECT COUNT(*) FROM authority_journal WHERE operation = 'sync'").fetchone()[0], 2)
+
+        before = m.head("dev", m.authority)
+        stray = git(m.authority, "commit-tree", before + "^{tree}", "-p", before, "-m", "local stray")
+        git(m.authority, "update-ref", "refs/heads/dev", stray, before)
+        def fail_transaction(*args, **kwargs):
+            raise RuntimeError("interrupted before discard ref write")
+
+        with m.context() as ctx, patch.object(upstream.gitops, "ref_transaction", side_effect=fail_transaction), self.assertRaisesRegex(RuntimeError, "before discard"):
+            upstream.discard(ctx)
+        discarded = self.call(m, upstream.discard)
+        self.assertEqual(discarded["discarded"][0]["commit"], stray)
+
+        plan, _, _ = self.promoted(m)
+        original_run = upstream.run
+
+        def fail_push(authority, *args):
+            if args and args[0] == "push":
+                raise RuntimeError("interrupted before publish push")
+            return original_run(authority, *args)
+
+        with m.context() as ctx, patch.object(upstream, "run", side_effect=fail_push), self.assertRaisesRegex(RuntimeError, "before publish"):
+            upstream.publish(ctx)
+        published = self.call(m, upstream.publish)
+        self.assertTrue(published["published"])
+        self.assertEqual(m.head("main"), plan["candidate"]["commit"])
+
     def test_mirror_writes_are_journalled(self):
         m = self.make()
         self.sync(m)
