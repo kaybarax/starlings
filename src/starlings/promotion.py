@@ -9,9 +9,9 @@ import time
 from . import enforcement, gitops
 from .adapters import host as adapters_host
 from .batches import Failure, check_text, default_owner, finalize, invalid, load_batch, load_lane, refs
-from .contracts import Approval, Promotion
+from .contracts import Approval, Promotion, Receipt
 from .store import LeaseHeld, LeaseLost
-from .verifier import assess, current_trust
+from .verifier import assess, consumed_approvals, current_trust, dead_approvals
 
 OPEN = ("intent", "ambiguous")
 
@@ -277,7 +277,8 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected
             raise Failure("stale", "stale-receipt", "receipt is stale: " + "; ".join(checked["reasons"]) + "; nothing was written", result)
         required = required_approvals(plan_row)
         approvals = [row["id"] for row in live_approvals(c, plan_id, ctx.store.clock())]
-        result["approvals"] = {"required": required, "live": approvals}
+        consumed = consumed_approvals(ctx, Receipt.from_dict(json.loads(receipt["record"])))
+        result["approvals"] = {"required": required, "live": approvals, "consumed": [item["id"] for item in consumed]}
         if len(approvals) < required:
             raise Failure("blocked", "approval-required", f"the {gate} gate requires {required} live approval(s) for plan {plan_id}; {len(approvals)} found; nothing was written", result)
         reasons, verify, found = sources(c, b, plan_row, candidate)
@@ -293,6 +294,9 @@ def promote(ctx, plan_id, receipt_id, owner=None, seconds=600, allow_unprotected
                 raise Failure("stale", "stale-receipt", "the plan's policy is no longer trusted; nothing was written", result)
             approvals = [row["id"] for row in live_approvals(tx, plan_id, ctx.store.clock())]
             result["approvals"]["live"] = approvals
+            gone = dead_approvals(tx, plan_id, consumed, ctx.store.clock())
+            if gone:
+                raise Failure("stale", "stale-receipt", f"approval(s) {', '.join(item['id'] for item in gone)} that the receipt's checks were shown are no longer live; nothing was written", result)
             if len(approvals) < required:
                 raise Failure("blocked", "approval-required", f"the {gate} gate requires {required} live approval(s); {len(approvals)} remain; nothing was written", result)
             if tx.execute("SELECT 1 FROM promotions WHERE repository = ? AND target = ? AND state IN ('intent', 'ambiguous')", (repository, target)).fetchone():

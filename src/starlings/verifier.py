@@ -276,6 +276,30 @@ def safe_file(root, relative):
     return path if path.is_file() else None
 
 
+def consumed_approvals(ctx, record):
+    """Approvals the run's checks were shown, read from the retained context files the receipt binds."""
+    found = {}
+    for path, _ in record.artifacts:
+        if not (path.startswith("logs/") and path.endswith(".context.json")):
+            continue
+        retained = safe_file(ctx.root, path)
+        if retained is None:
+            continue
+        try:
+            shown = json.loads(retained.read_text(encoding="utf-8")).get("approvals", [])
+        except (ValueError, AttributeError, UnicodeError):
+            continue
+        for item in shown if type(shown) is list else []:
+            if type(item) is dict and type(item.get("id")) is str and type(item.get("by")) is str:
+                found[item["id"]] = {"id": item["id"], "by": item["by"], "review": item.get("review")}
+    return [found[key] for key in sorted(found)]
+
+
+def dead_approvals(c, plan_id, consumed, now):
+    """Consumed approvals with no live grant by the same identity for the same review on this plan."""
+    return [item for item in consumed if c.execute("SELECT 1 FROM approvals WHERE plan_id = ? AND by_identity = ? AND review IS ? AND revoked_at IS NULL AND expires_at > ? LIMIT 1", (plan_id, item["by"], item["review"], now)).fetchone() is None]
+
+
 def hosted_reasons(ctx, plan_row, plan_record, candidate, rows):
     reasons = []
     policy = json.loads(plan_row["policy"])
@@ -379,6 +403,10 @@ def assess(ctx, receipt_id, target=None):
             invalid_reasons.append("receipt binds files that no evidence lists")
     if plan_record["executor"] == "github":
         invalid_reasons += hosted_reasons(ctx, plan_row, plan_record, candidate, rows)
+    consumed = consumed_approvals(ctx, record)
+    dead = dead_approvals(c, record.plan_id, consumed, ctx.store.clock())
+    for item in dead:
+        stale_reasons.append(f"approval {item['id']} by {item['by']!r} (review {item['review']!r}), which the checks were shown, is no longer live: it was revoked or has expired")
     trusted = current_trust(c, row["authority"])
     if trusted is None or trusted["digest"] != record.policy_digest:
         stale_reasons.append(f"policy {record.policy_digest} is no longer the trusted policy for {row['authority']}" + (f" (now {trusted['digest']})" if trusted else ""))
@@ -388,7 +416,7 @@ def assess(ctx, receipt_id, target=None):
         stale_reasons.append(f"{record.target} in the {'coordinator mirror' if LANE_REF.fullmatch(record.target) else 'authority'} is {head}, not the receipt base {record.base}")
     status = "invalid" if invalid_reasons else "failed" if record.outcome != "passed" else "stale" if stale_reasons else "valid"
     reasons = invalid_reasons + stale_reasons + (["receipt records a failed outcome"] if record.outcome != "passed" else [])
-    return status, {"receipt_id": receipt_id, "status": status, "outcome": record.outcome, "reasons": reasons, "plan_id": record.plan_id, "run_id": row["run_id"], "candidate_id": record.candidate_id, "target": record.target, "expected_target": expected, "base": record.base, "authority_head": head, "policy_digest": record.policy_digest, "trusted_digest": trusted["digest"] if trusted else None, "verifier": record.verifier, "current_fingerprint": current_fingerprint, "authorizes": status == "valid", "receipt": record.to_dict()}
+    return status, {"receipt_id": receipt_id, "status": status, "outcome": record.outcome, "reasons": reasons, "plan_id": record.plan_id, "run_id": row["run_id"], "candidate_id": record.candidate_id, "target": record.target, "expected_target": expected, "base": record.base, "authority_head": head, "policy_digest": record.policy_digest, "trusted_digest": trusted["digest"] if trusted else None, "verifier": record.verifier, "current_fingerprint": current_fingerprint, "authorizes": status == "valid", "consumed_approvals": [{**item, "live": item not in dead} for item in consumed], "receipt": record.to_dict()}
 
 
 def check(ctx, receipt_id, target=None):
