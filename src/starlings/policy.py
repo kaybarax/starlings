@@ -42,7 +42,7 @@ def strings(value, path, nonempty=True):
 
 
 def validate(data):
-    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github", "environment"))
+    table(data, "policy", ("schema", "project", "staging", "release", "fully_verified_release", "authority", "gates", "checks", "limits"), ("assembly", "selection", "artifacts", "exclusive", "guest", "github", "environment", "identity"))
     require(type(data["schema"]) is int and data["schema"] == 1, "schema", "only integer schema version 1 is supported")
     text(data["project"], "project")
     for key in ("staging", "release"):
@@ -122,6 +122,11 @@ def validate(data):
             require(type(data["github"]["reusable_workflow"]) is str and bool(REUSABLE.fullmatch(data["github"]["reusable_workflow"])), "github.reusable_workflow", "expected a reusable workflow reference pinned as path@<40 lowercase hex>")
         if "workflow" in data["github"]:
             require(type(data["github"]["workflow"]) is str and bool(WORKFLOW.fullmatch(data["github"]["workflow"])), "github.workflow", "expected a project caller workflow path .github/workflows/<name>.yml or .yaml")
+    if "identity" in data:
+        table(data["identity"], "identity", ("name", "email"))
+        for key in ("name", "email"):
+            text(data["identity"][key], f"identity.{key}")
+            require(data["identity"][key] == data["identity"][key].strip() and not any(c in data["identity"][key] for c in "<>"), f"identity.{key}", "expected a value without angle brackets or surrounding whitespace")
     if "environment" in data:
         table(data["environment"], "environment", (), ("home", "pass"))
         if "home" in data["environment"]:
@@ -174,7 +179,7 @@ def render(data):
     def value(item):
         return json.dumps(item, ensure_ascii=False).replace("\x7f", "\\u007f")
     lines = [f"{key} = {value(data[key])}" for key in ("schema", "project", "staging", "release", "fully_verified_release")]
-    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github", "environment") if section in data), ("limits", data["limits"])]:
+    for section, entries in [("authority", data["authority"]), *((("assembly", data["assembly"]),) if "assembly" in data else ()), *((f"gates.{name}", gate) for name, gate in data["gates"].items()), ("checks", data["checks"]), *((section, data[section]) for section in ("selection", "artifacts", "exclusive", "guest", "github", "environment", "identity") if section in data), ("limits", data["limits"])]:
         lines.extend(["", f"[{section}]"])
         lines.extend(f"{key} = {value(item)}" for key, item in entries.items())
     return "\n".join(lines) + "\n"

@@ -105,5 +105,36 @@ class EnvironmentTests(tv.VerifierCase):
         self.assertEqual(len([line for line in warnings(policy) if line.startswith("environment:")]), 2)
 
 
+class IdentityTests(tv.VerifierCase):
+    def signature(self, repository, commit):
+        return tv.git(repository, "log", "-1", "--format=%an <%ae>|%cn <%ce>", commit)
+
+    def test_policy_identity_signs_every_commit_starlings_creates(self):
+        policy = parse(tv.build_policy({"ledger": tv.LEDGER}, scope="none"))
+        policy["identity"] = {"name": "Release Owner", "email": "owner@example.invalid"}
+        fixture = self.make(render(policy))
+        self.ready(fixture)
+        tv.ok(self, fixture.call("prepare", "b1", ["ledger"], str(fixture.authority)))
+        work = tv.ok(self, fixture.call("assign", "b1", "solo", "ledger", "worker-a", []))
+        head = fixture.work(work["worktree"], {"ledger.txt": "total = 1\n"}, "solo change")
+        tv.ok(self, fixture.call("handoff", "b1", "solo", head, "review:solo", []))
+        included = tv.ok(self, fixture.call("assemble", "b1", "ledger"))["included"][0]["commit"]
+        tv.ok(self, fixture.call("freeze", "b1", "ledger"))
+        staged = tv.ok(self, fixture.call("stage", "b1", ["ledger"]))["candidates"][0]["commit"]
+        release = self.plan(fixture, gate="release")["candidate"]["commit"]
+        mirror = tv.ok(self, fixture.call("status", "b1"))["mirror"]
+        wanted = "Release Owner <owner@example.invalid>|Release Owner <owner@example.invalid>"
+        for commit in (included, staged, release):
+            self.assertEqual(self.signature(mirror, commit), wanted)
+
+    def test_default_identity_and_validation(self):
+        policy = preset("release-only")
+        for value in ({"name": "Owner"}, {"name": "Owner", "email": "a <b>"}, {"name": " Owner", "email": "o@example.invalid"}, {"name": "Owner", "email": "o@example.invalid", "extra": 1}):
+            with self.subTest(value=value), self.assertRaises(PolicyError):
+                validate({**policy, "identity": value})
+        policy["identity"] = {"name": "Owner", "email": "o@example.invalid"}
+        self.assertEqual(parse(render(policy))["identity"], policy["identity"])
+
+
 if __name__ == "__main__":
     unittest.main()

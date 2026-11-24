@@ -326,6 +326,15 @@ def reconcile_lane(ctx, lease, b, lane, strict=True):
     return actions
 
 
+def identity(policy):
+    chosen = policy.get("identity")
+    return (chosen["name"], chosen["email"]) if chosen else None
+
+
+def batch_identity(b):
+    return identity(json.loads(b["policy"]))
+
+
 def task_gate(b):
     return json.loads(b["policy"])["gates"]["task"]["scope"] != "none"
 
@@ -486,7 +495,7 @@ def assemble(ctx, batch, lane, owner=None, seconds=600):
                 park(ctx, lease, batch, name, "conflict", reason)
                 result["parked"].append({"task": name, "kind": "conflict", "reason": reason, "paths": conflicts, "lane_tip": tip})
                 continue
-            commit = gitops.commit_tree(mirror, tree, (tip, t["head"]), f"starlings: include {name} in {batch}/{lane}\n\nTask-Head: {t['head']}\nReview: {t['review']}\n", b["created"])
+            commit = gitops.commit_tree(mirror, tree, (tip, t["head"]), f"starlings: include {name} in {batch}/{lane}\n\nTask-Head: {t['head']}\nReview: {t['review']}\n", b["created"], batch_identity(b))
             if gated:
                 result["pending"] = task_candidate(ctx, lease, b, t, ref, current, tip, commit, tree, (tip, t["head"]))
                 break
@@ -621,7 +630,7 @@ def entries(c, batch, lanes):
     return tuple(result), resolutions
 
 
-def build(mirror, old, tips, lanes, batch, date):
+def build(mirror, old, tips, lanes, batch, date, identity=None):
     current = old
     tree = gitops.tree_of(mirror, old)
     for lane, tip in zip(lanes, tips):
@@ -629,9 +638,9 @@ def build(mirror, old, tips, lanes, batch, date):
         if conflicts:
             return None, None, {"lane": lane, "paths": conflicts}
         if len(tips) > 1:
-            current = gitops.commit_tree(mirror, tree, (current, tip), f"starlings: intermediate {batch} {lane}", date)
+            current = gitops.commit_tree(mirror, tree, (current, tip), f"starlings: intermediate {batch} {lane}", date, identity)
     message = f"starlings: stage {batch} lanes {', '.join(lanes)}\n\n" + "".join(f"Lane-{lane}: {tip}\n" for lane, tip in zip(lanes, tips))
-    return gitops.commit_tree(mirror, tree, (old, *tips), message, date), tree, None
+    return gitops.commit_tree(mirror, tree, (old, *tips), message, date, identity), tree, None
 
 
 def finalize(tx, batch, candidate_id, names):
@@ -669,7 +678,7 @@ def apply_resolution(ctx, b, old, tips, names, resolution, review, result):
         raise Failure("blocked", "undeclared-dependency", "staging resolution " + undeclared_reason(hidden) + "; nothing was written", result)
     tree = gitops.tree_of(mirror, resolution)
     message = f"starlings: stage {b['name']} lanes {', '.join(names)} with reviewed resolution\n\nResolution: {resolution}\nReview: {review}\n" + "".join(f"Lane-{lane}: {tip}\n" for lane, tip in zip(names, tips))
-    return gitops.commit_tree(mirror, tree, (old, *tips), message, b["created"]), tree
+    return gitops.commit_tree(mirror, tree, (old, *tips), message, b["created"], batch_identity(b)), tree
 
 
 def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=None, allow_unprotected=False):
@@ -739,7 +748,7 @@ def stage(ctx, batch, lanes, owner=None, seconds=600, resolution=None, review=No
             already = [name for name, tip in zip(names, tips) if tip != b["base"] and gitops.is_ancestor(mirror, tip, old)]
             if already:
                 raise Failure("blocked", "already-landed", f"frozen tips of lanes {', '.join(already)} are already contained in {target} without a recorded landing; nothing was written", result)
-            commit, tree, conflict = build(mirror, old, tips, names, batch, b["created"])
+            commit, tree, conflict = build(mirror, old, tips, names, batch, b["created"], batch_identity(b))
             if conflict and resolution is None:
                 result["conflict"] = conflict
                 raise Failure("blocked", "conflict", f"lane {conflict['lane']!r} conflicts with {target} in: {', '.join(conflict['paths'])}; nothing was written. Supply a reviewed --resolution containing {target} and the frozen lane tips", result)

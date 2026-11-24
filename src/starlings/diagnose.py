@@ -89,7 +89,7 @@ class Diagnosis:
         """Build one subset candidate on the release baseline and re-run the checks."""
         entry = {"position": len(self.entries) + 1, "id": f"diag-{len(self.entries) + 1:02d}-{secrets.token_hex(8)}", "basis": basis, "commit": None, "tree": None, "ref": None, "conflict": None, "checks": [], "processes": []}
         if tips:
-            commit, tree, conflict = batches.build(self.mirror, self.baseline, tips, labels, self.b["name"], self.b["created"])
+            commit, tree, conflict = batches.build(self.mirror, self.baseline, tips, labels, self.b["name"], self.b["created"], batches.batch_identity(self.b))
             if conflict:
                 entry["conflict"] = {"merged_against": conflict["lane"], "paths": conflict["paths"]}
             else:

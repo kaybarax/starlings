@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import gitops, signer
 from .adapters import host as adapters_host
-from .batches import Failure, check_object, check_text, default_owner, invalid, load_batch, refs
+from .batches import Failure, check_object, check_text, default_owner, identity, invalid, load_batch, refs
 from .contracts import LANE_REF, Candidate, Evidence, Plan, Receipt
 from .policy import PolicyError, parse
 from .state import private_dir
@@ -157,7 +157,7 @@ def release_candidate(ctx, b, policy):
     if conflicts:
         raise Failure("blocked", "release-conflict", f"{policy['staging']} conflicts with {policy['release']} in: {', '.join(conflicts)}; resolve on {policy['staging']}, review and freeze again. Nothing was written.", {"paths": conflicts, "staging_head": staging, "release_head": release})
     message = f"starlings: release {b['name']}\n\nRelease-Base: {release}\nStaging-Head: {staging}\n"
-    commit = gitops.commit_tree(mirror, tree, (release, staging), message, b["created"])
+    commit = gitops.commit_tree(mirror, tree, (release, staging), message, b["created"], identity(policy))
     candidate = Candidate(b["project"], str(authority), gate_target(policy, "release"), release, (release, staging), tree, commit)
     ref = refs(b["name"])["candidate"](candidate.id)
     retained = gitops.ref_value(mirror, ref)

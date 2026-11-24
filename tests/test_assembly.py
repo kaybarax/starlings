@@ -543,18 +543,16 @@ class AssemblyTests(unittest.TestCase):
 
 
 class CommitIdentityTests(unittest.TestCase):
-    def test_identity_defaults_and_environment_override(self):
-        with patch.dict("os.environ", {}, clear=False) as env:
-            env.pop("STARLINGS_COMMIT_NAME", None)
-            env.pop("STARLINGS_COMMIT_EMAIL", None)
-            default = gitops.environment(0)
-            self.assertEqual((default["GIT_AUTHOR_NAME"], default["GIT_COMMITTER_EMAIL"]), gitops.IDENTITY)
-        with patch.dict("os.environ", {"STARLINGS_COMMIT_NAME": "release-owner", "STARLINGS_COMMIT_EMAIL": "owner@example.invalid"}):
-            chosen = gitops.environment(0)
-            for role in ("AUTHOR", "COMMITTER"):
-                self.assertEqual(chosen[f"GIT_{role}_NAME"], "release-owner")
-                self.assertEqual(chosen[f"GIT_{role}_EMAIL"], "owner@example.invalid")
-            self.assertNotIn("GIT_AUTHOR_NAME", gitops.environment())
+    def test_identity_defaults_and_policy_override(self):
+        default = gitops.environment(0)
+        self.assertEqual((default["GIT_AUTHOR_NAME"], default["GIT_COMMITTER_EMAIL"]), gitops.IDENTITY)
+        with patch.dict("os.environ", {"STARLINGS_COMMIT_NAME": "ignored", "STARLINGS_COMMIT_EMAIL": "ignored@example.invalid"}):
+            self.assertEqual(gitops.environment(0)["GIT_AUTHOR_NAME"], gitops.IDENTITY[0])
+        chosen = gitops.environment(0, ("release-owner", "owner@example.invalid"))
+        for role in ("AUTHOR", "COMMITTER"):
+            self.assertEqual(chosen[f"GIT_{role}_NAME"], "release-owner")
+            self.assertEqual(chosen[f"GIT_{role}_EMAIL"], "owner@example.invalid")
+        self.assertNotIn("GIT_AUTHOR_NAME", gitops.environment())
 
 
 if __name__ == "__main__":

@@ -14,20 +14,19 @@ class GitError(RuntimeError):
         self.returncode = returncode
 
 
-def environment(date=None):
+def environment(date=None, identity=None):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file", "GIT_PROTOCOL_FROM_USER": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
     if date is not None:
         for role in ("AUTHOR", "COMMITTER"):
-            env[f"GIT_{role}_NAME"] = os.environ.get("STARLINGS_COMMIT_NAME") or IDENTITY[0]
-            env[f"GIT_{role}_EMAIL"] = os.environ.get("STARLINGS_COMMIT_EMAIL") or IDENTITY[1]
+            env[f"GIT_{role}_NAME"], env[f"GIT_{role}_EMAIL"] = identity or IDENTITY
             env[f"GIT_{role}_DATE"] = f"{int(date)} +0000"
     return env
 
 
-def git(repository, *args, ok=(0,), date=None, text=True, input=None, hooks=False):
+def git(repository, *args, ok=(0,), date=None, text=True, input=None, hooks=False, identity=None):
     argv = ["git", *(CONFIG if not hooks else CONFIG[len(NO_HOOKS):]), *(("-C", str(repository)) if repository is not None else ()), *args]
-    result = subprocess.run(argv, capture_output=True, text=text, env=environment(date), input=input, stdin=subprocess.DEVNULL if input is None else None, check=False)
+    result = subprocess.run(argv, capture_output=True, text=text, env=environment(date, identity), input=input, stdin=subprocess.DEVNULL if input is None else None, check=False)
     if result.returncode not in ok:
         raise GitError(list(args), result.returncode, result.stderr if text else result.stderr.decode("utf-8", "replace"))
     return result
@@ -94,11 +93,11 @@ def merge(repository, ours, theirs):
     return fields[0], sorted({path for path in fields[1:] if path}) if result.returncode == 1 else []
 
 
-def commit_tree(repository, tree, parents, message, date):
+def commit_tree(repository, tree, parents, message, date, identity=None):
     args = ["commit-tree", tree]
     for parent in parents:
         args += ["-p", parent]
-    return git(repository, *args, "-m", message, date=date).stdout.strip()
+    return git(repository, *args, "-m", message, date=date, identity=identity).stdout.strip()
 
 
 def tree_of(repository, commit):
